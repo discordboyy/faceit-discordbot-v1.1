@@ -1,36 +1,80 @@
-# Discord FACEIT бот (CS2)
+# Discord FACEIT бот (CS2) + SQLite
 
 ## Команды
-- `/link` — авторизация через Discord, бот берёт подключённый Steam и присылает в ЛС статистику FACEIT (уровень, ELO, матчи, Win Rate, K/D, хедшоты).
-- `/faceit <ник>` — статистика по нику FACEIT без авторизации.
+- `/link` — авторизация через Discord, бот берёт подключённый Steam, запоминает его и присылает статистику FACEIT (в ЛС и на странице после авторизации).
+- `/stats` — своя статистика без повторной авторизации.
+- `/faceit <ник>` — статистика по нику FACEIT.
+- `/unlink` — удалить свои данные из базы.
 
-## Настройка
-1. Discord Developer Portal → New Application.
-   - Bot → Reset Token → `DISCORD_TOKEN`
-   - OAuth2 → Client ID / Client Secret → `DISCORD_CLIENT_ID` / `DISCORD_CLIENT_SECRET`
-   - OAuth2 → Redirects → добавь `https://your-domain.com/callback` (или `http://localhost:5000/callback` для локалки)
-   - OAuth2 → URL Generator → scopes `bot` и `applications.commands`, право Send Messages → пригласи бота на сервер.
-2. FACEIT: https://developers.faceit.com → App Studio → Create App → Server side API key → `FACEIT_API_KEY`.
-3. Скопируй `.env.example` в `.env` и заполни.
+## Что хранится в SQLite (bot.db)
+- `users` — discord_id, steam_id64, steam_name, время обновления (OAuth-токены не хранятся)
+- `oauth_states` — одноразовые state для ссылок авторизации (живут 10 минут)
+- `cache` — кэш ответов FACEIT (по умолчанию 5 минут)
 
-## Запуск
+## Discord Developer Portal
+- Bot → Reset Token → `DISCORD_TOKEN`
+- OAuth2 → Client ID / Client Secret → `DISCORD_CLIENT_ID` / `DISCORD_CLIENT_SECRET`
+- OAuth2 → Redirects → `https://makki-solutions.bid/callback`
+- OAuth2 → URL Generator → scopes `bot` + `applications.commands` (+ права Send Messages, Embed Links) → открой ссылку и добавь бота на сервер
+
+## FACEIT
+https://developers.faceit.com → App Studio → Create App → Server side API key → `FACEIT_API_KEY`
+
+## Установка на сервер (Ubuntu)
 ```
-python -m venv venv
-venv\Scripts\activate        # Windows  (macOS/Linux: source venv/bin/activate)
-pip install -r requirements.txt
-python main.py
+mkdir -p ~/faceit-bot && cd ~/faceit-bot
+# скопируй сюда файлы проекта
+python3 -m venv venv
+venv/bin/pip install -r requirements.txt
+cp .env.example .env && chmod 600 .env && nano .env
 ```
 
-## Свой домен (HTTPS)
-- A-запись домена → IP сервера (или Cloudflare Tunnel, если бот на домашнем ПК).
-- Reverse proxy, например Caddy:
-  ```
-  your-domain.com {
-      reverse_proxy 127.0.0.1:5000
-  }
-  ```
-  и `WEB_HOST=127.0.0.1` в `.env`.
-- Открой порты 80 и 443.
+### systemd — /etc/systemd/system/faceit-bot.service
+```
+[Unit]
+Description=Discord FACEIT bot
+After=network.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/faceit-bot
+ExecStart=/home/ubuntu/faceit-bot/venv/bin/python main.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+```
+sudo systemctl daemon-reload
+sudo systemctl enable --now faceit-bot
+journalctl -u faceit-bot -f
+```
+
+### Reverse proxy для /callback
+Сначала проверь, что уже занимает 80/443:
+```
+sudo ss -tlnp | grep -E ':80 |:443 |:5000 '
+```
+**Если nginx** — в server-блок домена добавь:
+```
+location /callback {
+    proxy_pass http://127.0.0.1:5000;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
+затем `sudo nginx -t && sudo systemctl reload nginx`.
+
+**Если Caddy** — в блок домена добавь:
+```
+handle /callback* {
+    reverse_proxy 127.0.0.1:5000
+}
+```
+затем `sudo systemctl reload caddy`.
+
+Проверка: открой `https://makki-solutions.bid/callback` — должно появиться «Некорректный запрос».
 
 ## Ограничения
 - Connections доступны только через OAuth2 с согласия пользователя.
