@@ -32,20 +32,29 @@ import db
 # Настройка
 # ---------------------------------------------------------------------------
 
-load_dotenv()
+# Если запущено под systemd с LoadCredentialEncrypted=env:..., секреты лежат
+# в расшифрованном виде во временной папке, доступной только этому сервису.
+_cred_dir = os.getenv("CREDENTIALS_DIRECTORY")
+if _cred_dir and os.path.isfile(os.path.join(_cred_dir, "env")):
+    load_dotenv(os.path.join(_cred_dir, "env"))
+else:
+    load_dotenv()
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 CLIENT_ID = os.getenv("DISCORD_CLIENT_ID")
 CLIENT_SECRET = os.getenv("DISCORD_CLIENT_SECRET")
-REDIRECT_URI = os.getenv("DISCORD_REDIRECT_URI", "https://makki-solutions.bid/callback")
+REDIRECT_URI = os.getenv("DISCORD_REDIRECT_URI", "https://faceit.makki-solutions.bid/callback")
 FACEIT_API_KEY = os.getenv("FACEIT_API_KEY")
 WEB_HOST = os.getenv("WEB_HOST", "127.0.0.1")
 WEB_PORT = int(os.getenv("WEB_PORT", "5000"))
 CACHE_TTL = int(os.getenv("CACHE_TTL", "300"))  # секунд
+DB_PATH = os.getenv("DB_PATH", "bot.db")
+DB_ENCRYPTION_KEY = os.getenv("DB_ENCRYPTION_KEY")
 
 if not all([DISCORD_TOKEN, CLIENT_ID, CLIENT_SECRET, FACEIT_API_KEY]):
     raise RuntimeError(
-        "Не заполнены переменные окружения. Скопируй .env.example в .env и заполни значения."
+        "Не заполнены переменные окружения (DISCORD_TOKEN, DISCORD_CLIENT_ID, "
+        "DISCORD_CLIENT_SECRET, FACEIT_API_KEY)."
     )
 
 logging.basicConfig(level=logging.INFO)
@@ -55,6 +64,7 @@ OAUTH_SCOPES = "identify connections"
 FACEIT_API = "https://open.faceit.com/data/v4"
 FACEIT_HEADERS = {"Authorization": f"Bearer {FACEIT_API_KEY}"}
 
+db.configure(DB_PATH, DB_ENCRYPTION_KEY)
 db.init_db()
 
 # ---------------------------------------------------------------------------
@@ -148,6 +158,9 @@ intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 bot_loop: asyncio.AbstractEventLoop | None = None
 
+# не чаще одного запуска команды раз в 15 секунд на пользователя
+cooldown = app_commands.checks.cooldown(1, 15.0, key=lambda i: i.user.id)
+
 
 @bot.event
 async def on_ready():
@@ -161,7 +174,24 @@ async def on_ready():
     log.info(f"Бот запущен как {bot.user}")
 
 
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.CommandOnCooldown):
+        msg = f"Подожди {error.retry_after:.0f} с перед следующим запуском."
+    else:
+        log.error("Ошибка команды", exc_info=error)
+        msg = "Произошла ошибка, попробуй позже."
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(msg, ephemeral=True)
+        else:
+            await interaction.response.send_message(msg, ephemeral=True)
+    except Exception:
+        pass
+
+
 @bot.tree.command(name="link", description="Привязать Steam через Discord и получить статистику FACEIT")
+@cooldown
 async def link(interaction: discord.Interaction):
     state = str(uuid.uuid4())
     db.create_state(state, interaction.user.id)
@@ -181,7 +211,8 @@ async def link(interaction: discord.Interaction):
             "Нажми на ссылку ниже и разреши доступ к своим Discord Connections.\n"
             "В User Settings → Connections должен быть подключён **Steam** "
             "с включённой видимостью.\n"
-            "Ссылка действует 10 минут. После привязки можно использовать `/stats`.\n\n"
+            "Ссылка личная, действует 10 минут и работает только с твоего аккаунта Discord. "
+            "После привязки можно использовать `/stats`.\n\n"
             f"[Авторизоваться через Discord]({oauth_url})"
         ),
         color=discord.Color.orange(),
@@ -190,6 +221,7 @@ async def link(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="stats", description="Твоя статистика FACEIT (нужна привязка через /link)")
+@cooldown
 async def stats_cmd(interaction: discord.Interaction):
     user = db.get_user(interaction.user.id)
     if not user:
@@ -204,23 +236,24 @@ async def stats_cmd(interaction: discord.Interaction):
         text = await asyncio.to_thread(
             cached, f"steam:{steam_id}", lambda: stats_by_steam(steam_id, steam_name)
         )
-    except Exception as e:
+    except Exception:
         log.exception("Ошибка /stats")
-        text = f"Ошибка при запросе к FACEIT: {e}"
+        text = "Не удалось получить статистику FACEIT, попробуй позже."
     await interaction.followup.send(text, ephemeral=True)
 
 
 @bot.tree.command(name="faceit", description="Статистика FACEIT по нику")
 @app_commands.describe(nickname="Ник на FACEIT")
-async def faceit_cmd(interaction: discord.Interaction, nickname: str):
+@cooldown
+async def faceit_cmd(interaction: discord.Interaction, nickname: app_commands.Range[str, 2, 32]):
     await interaction.response.defer(thinking=True)
     try:
         text = await asyncio.to_thread(
             cached, f"nick:{nickname.lower()}", lambda: stats_by_nickname(nickname)
         )
-    except Exception as e:
+    except Exception:
         log.exception("Ошибка /faceit")
-        text = f"Ошибка при запросе к FACEIT: {e}"
+        text = "Не удалось получить статистику FACEIT, попробуй позже."
     await interaction.followup.send(text)
 
 
@@ -236,6 +269,16 @@ async def unlink(interaction: discord.Interaction):
 # ---------------------------------------------------------------------------
 
 flask_app = Flask(__name__)
+
+
+@flask_app.after_request
+def security_headers(resp):
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["X-Frame-Options"] = "DENY"
+    resp.headers["Referrer-Policy"] = "no-referrer"
+    resp.headers["Cache-Control"] = "no-store"
+    resp.headers["Content-Security-Policy"] = "default-src 'none'; style-src 'unsafe-inline'"
+    return resp
 
 
 def page(title: str, body: str = "", status: int = 200) -> Response:
@@ -257,7 +300,7 @@ def oauth_callback():
     error = request.args.get("error")
 
     if error:
-        return page("Авторизация отклонена", error, 400)
+        return page("Авторизация отклонена", "Попробуй /link ещё раз.", 400)
     if not code or not state:
         return page("Некорректный запрос", "Попробуй /link ещё раз.", 400)
 
@@ -265,8 +308,22 @@ def oauth_callback():
     if discord_user_id is None:
         return page("Ссылка устарела", "Попробуй /link ещё раз.", 400)
 
+    access_token = None
     try:
         access_token = exchange_code_for_token(code)
+
+        # Проверяем, что авторизовался тот же аккаунт Discord, который вызвал /link.
+        # Иначе чужую ссылку можно подсунуть другому человеку и привязать его Steam к себе.
+        me = get_discord_user(access_token)
+        if int(me["id"]) != discord_user_id:
+            log.warning("OAuth: аккаунт Discord не совпал с владельцем ссылки")
+            return page(
+                "Ссылка выдана другому аккаунту",
+                "Открой ссылку с того же аккаунта Discord, который вызвал /link, "
+                "и запусти /link заново.",
+                403,
+            )
+
         connections = get_discord_connections(access_token)
         steam = next((c for c in connections if c.get("type") == "steam"), None)
 
@@ -289,9 +346,13 @@ def oauth_callback():
             text.replace("**", "") + "\n\nТеперь можно использовать /stats в Discord.",
         )
 
-    except Exception as e:
+    except Exception:
         log.exception("Ошибка при обработке OAuth callback")
-        return page("Произошла ошибка", str(e), 500)
+        return page("Произошла ошибка", "Не удалось завершить привязку. Попробуй /link ещё раз позже.", 500)
+    finally:
+        # токен нужен был один раз — отзываем, чтобы он не мог быть использован повторно
+        if access_token:
+            revoke_token(access_token)
 
 
 def exchange_code_for_token(code: str) -> str:
@@ -311,6 +372,16 @@ def exchange_code_for_token(code: str) -> str:
     return resp.json()["access_token"]
 
 
+def get_discord_user(access_token: str) -> dict:
+    resp = requests.get(
+        "https://discord.com/api/users/@me",
+        headers={"Authorization": f"Bearer {access_token}"},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
 def get_discord_connections(access_token: str) -> list[dict]:
     resp = requests.get(
         "https://discord.com/api/users/@me/connections",
@@ -319,6 +390,22 @@ def get_discord_connections(access_token: str) -> list[dict]:
     )
     resp.raise_for_status()
     return resp.json()
+
+
+def revoke_token(access_token: str):
+    try:
+        requests.post(
+            "https://discord.com/api/oauth2/token/revoke",
+            data={
+                "client_id": CLIENT_ID,
+                "client_secret": CLIENT_SECRET,
+                "token": access_token,
+                "token_type_hint": "access_token",
+            },
+            timeout=10,
+        )
+    except Exception:
+        log.warning("Не удалось отозвать OAuth-токен (не критично)")
 
 
 # ---------------------------------------------------------------------------
