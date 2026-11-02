@@ -218,6 +218,50 @@ class ScrimView(discord.ui.View):
         await interaction.response.edit_message(embed=_embed(item), view=self)
 
 
+class ConfirmMoveView(discord.ui.View):
+    def __init__(self, scrim_id, actor_id, player_id, team_index):
+        super().__init__(timeout=60)
+        self.scrim_id = scrim_id
+        self.actor_id = actor_id
+        self.player_id = player_id
+        self.team_index = team_index
+
+    async def _apply(self, interaction):
+        if interaction.user.id != self.actor_id:
+            await interaction.response.send_message("Bare den som startet flyttingen kan bekrefte.", ephemeral=True)
+            return
+        item = _load(self.scrim_id)
+        if not item or item["status"] != "locked":
+            await interaction.response.edit_message(content="Scrimmen er ikke lenger låst/aktiv.", view=None)
+            return
+        if not _is_staff(interaction, item):
+            await interaction.response.send_message("Du har ikke tilgang.", ephemeral=True)
+            return
+        player = next((p for p in item["players"] if p["id"] == self.player_id), None)
+        if not player:
+            await interaction.response.edit_message(content="Spilleren finnes ikke i påmeldingen.", view=None)
+            return
+        teams = item.get("teams", [[], []])
+        for team in teams:
+            team[:] = [p for p in team if p["id"] != self.player_id]
+        teams[self.team_index].append(player)
+        item["teams"] = teams
+        _save(item)
+        await interaction.response.edit_message(content="Spilleren er flyttet.", view=None)
+        await _refresh(item, interaction)
+
+    @discord.ui.button(label="Bekreft flytting", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction, button):
+        await self._apply(interaction)
+
+    @discord.ui.button(label="Avbryt", style=discord.ButtonStyle.secondary)
+    async def abort(self, interaction, button):
+        if interaction.user.id != self.actor_id:
+            await interaction.response.send_message("Bare den som startet flyttingen kan avbryte.", ephemeral=True)
+            return
+        await interaction.response.edit_message(content="Flyttingen ble avbrutt.", view=None)
+
+
 class Scrim(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -278,6 +322,42 @@ class Scrim(commands.Cog):
         _save(item)
         await interaction.response.send_message("Scrimmen er låst.", ephemeral=True)
         await _refresh(item, interaction)
+
+    @app_commands.command(name="scrim_move", description="Flytt en spiller til det andre laget")
+    @app_commands.guild_only()
+    @app_commands.choices(team=[
+        app_commands.Choice(name="Lag A", value=0),
+        app_commands.Choice(name="Lag B", value=1),
+    ])
+    async def move(self, interaction: discord.Interaction, scrim_id: str,
+                   member: discord.Member, team: app_commands.Choice[int]):
+        item = _load(scrim_id)
+        if not item or item["guild_id"] != interaction.guild_id:
+            await interaction.response.send_message("Fant ikke scrimmen.", ephemeral=True)
+            return
+        if not _is_staff(interaction, item):
+            await interaction.response.send_message("Kun arrangør eller moderator kan gjøre dette.", ephemeral=True)
+            return
+        if item["status"] != "locked":
+            await interaction.response.send_message("Lås scrimmen før manuelle lagendringer.", ephemeral=True)
+            return
+        if not any(p["id"] == member.id for p in item["players"]):
+            await interaction.response.send_message("Spilleren er ikke påmeldt.", ephemeral=True)
+            return
+        current = next((i for i, group in enumerate(item.get("teams", [[], []]))
+                        if any(p["id"] == member.id for p in group)), None)
+        if current is None:
+            await interaction.response.send_message("Lagene er ikke fordelt ennå.", ephemeral=True)
+            return
+        if current == team.value:
+            await interaction.response.send_message("Spilleren er allerede på dette laget.", ephemeral=True)
+            return
+        view = ConfirmMoveView(scrim_id, interaction.user.id, member.id, team.value)
+        await interaction.response.send_message(
+            f"Bekreft at {member.mention} flyttes til {'Lag A' if team.value == 0 else 'Lag B'}. "
+            "Dette endrer den manuelle lagfordelingen.",
+            view=view, ephemeral=True,
+        )
 
     @app_commands.command(name="scrim_cancel", description="Avlys en scrim")
     @app_commands.guild_only()
