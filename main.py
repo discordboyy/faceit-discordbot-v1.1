@@ -89,6 +89,8 @@ async def on_ready():
     global bot_loop
     bot_loop = asyncio.get_running_loop()
     try:
+        if "scrim" not in bot.extensions:
+            await bot.load_extension("scrim")
         synced = await bot.tree.sync()
         log.info(f"Синхронизировано {len(synced)} слэш-команд")
     except Exception as e:
