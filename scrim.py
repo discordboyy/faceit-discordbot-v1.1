@@ -30,9 +30,13 @@ def init_db():
                 status TEXT NOT NULL DEFAULT 'open',
                 mode TEXT NOT NULL,
                 players_json TEXT NOT NULL DEFAULT '[]',
+                teams_json TEXT NOT NULL DEFAULT '[[],[]]',
                 created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
             )
         """)
+        columns = {r["name"] for r in conn.execute("PRAGMA table_info(scrims)")}
+        if "teams_json" not in columns:
+            conn.execute("ALTER TABLE scrims ADD COLUMN teams_json TEXT NOT NULL DEFAULT '[[],[]]'")
 
 
 def _load(scrim_id):
@@ -42,14 +46,16 @@ def _load(scrim_id):
         return None
     item = dict(row)
     item["players"] = json.loads(item.pop("players_json"))
+    item["teams"] = json.loads(item.pop("teams_json"))
     return item
 
 
 def _save(item):
     with db.get_conn() as conn:
         conn.execute(
-            "UPDATE scrims SET status=?, players_json=?, message_id=? WHERE id=?",
-            (item["status"], json.dumps(item["players"]), item.get("message_id"), item["id"]),
+            "UPDATE scrims SET status=?, players_json=?, teams_json=?, message_id=? WHERE id=?",
+            (item["status"], json.dumps(item["players"]), json.dumps(item.get("teams", [[], []])),
+             item.get("message_id"), item["id"]),
         )
 
 
@@ -65,10 +71,11 @@ def _insert(item):
     with db.get_conn() as conn:
         conn.execute(
             """INSERT INTO scrims
-            (id,guild_id,channel_id,organizer_id,status,mode,players_json)
-            VALUES (?,?,?,?,?,?,?)""",
+            (id,guild_id,channel_id,organizer_id,status,mode,players_json,teams_json)
+            VALUES (?,?,?,?,?,?,?,?)""",
             (item["id"], item["guild_id"], item["channel_id"], item["organizer_id"],
-             item["status"], item["mode"], json.dumps(item["players"])),
+             item["status"], item["mode"], json.dumps(item["players"]),
+             json.dumps(item.get("teams", [[], []]))),
         )
 
 
