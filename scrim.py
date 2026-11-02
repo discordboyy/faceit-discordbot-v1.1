@@ -113,8 +113,9 @@ def _balanced(players, mode):
 def _embed(item):
     players = item["players"]
     teams = item.get("teams") or [[], []]
+    assigned = bool(any(teams))
     team_ids = {p["id"] for team in teams for p in team}
-    waiting = [p for p in players if p["id"] not in team_ids]
+    waiting = [p for p in players if p["id"] not in team_ids] if assigned else players[MAX_PLAYERS:]
     def line(p):
         rating = f" · {p['elo']} ELO / Lv {p['level']}" if p.get("elo") is not None else ""
         return f"<@{p['id']}>{rating}"
