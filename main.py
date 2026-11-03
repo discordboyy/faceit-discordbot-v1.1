@@ -177,7 +177,6 @@ async def stats_cmd(interaction: discord.Interaction, member: discord.Member | N
 
     # Своя статистика — приватно; статистика другого участника — в канале.
     await interaction.response.defer(thinking=True, ephemeral=own)
-    label = None if own else target.display_name
 
     try:
         player = await asyncio.to_thread(
@@ -212,70 +211,56 @@ async def stats_cmd(interaction: discord.Interaction, member: discord.Member | N
             recent = {"matches": 0}
 
         nickname = player.get("nickname", "—")
+        display_name = target.display_name
         profile_url = player.get("faceit_url", "").replace("{lang}", "en")
-        matches = recent.get("matches", 0)
+        matches = int(recent.get("matches") or 0)
+        wins = int(recent.get("wins") or 0)
+        losses = max(0, matches - wins)
 
+        # Карточка в стиле примера: компактные поля в три колонки и FACEIT OG image.
         embed = discord.Embed(
-            title=f"🎮 {nickname} · FACEIT CS2",
-            description=f"Статистика игрока **{label or nickname}**",
+            title=f"╭  FACEIT CS2 — {nickname} ({display_name}) ╮",
             url=profile_url or None,
-            color=discord.Color.orange(),
+            color=0x1B1B1B,
         )
 
-        avatar = player.get("avatar")
-        if avatar:
-            embed.set_thumbnail(url=avatar)
-
-        embed.add_field(
-            name="🏅 Уровень",
-            value=f"**{cs2.get('skill_level', '—')}**",
-            inline=True,
-        )
-        embed.add_field(
-            name="🔥 ELO",
-            value=f"**{cs2.get('faceit_elo', '—')}**",
-            inline=True,
-        )
-        embed.add_field(
-            name="🌍 Регион",
-            value=cs2.get("region", "—"),
-            inline=True,
-        )
-        embed.add_field(
-            name="🏳️ Страна",
-            value=str(player.get("country", "—")).upper(),
-            inline=True,
-        )
+        embed.add_field(name="Уровень:", value=str(cs2.get("skill_level", "—")), inline=True)
+        embed.add_field(name="ELO:", value=str(cs2.get("faceit_elo", "—")), inline=True)
+        embed.add_field(name="Регион:", value=str(cs2.get("region", "—")), inline=True)
+        embed.add_field(name="Страна:", value=str(player.get("country", "—")).upper(), inline=True)
 
         if matches:
-            wins = recent.get("wins", 0)
-            losses = matches - wins
-            stats_lines = [
-                f"**Win Rate:** {recent.get('win_rate', 0):.0f}%",
-                f"**Победы / поражения:** {wins}W / {losses}L",
-            ]
-
-            if recent.get("kd") is not None:
-                stats_lines.append(f"**K/D:** {recent['kd']:.2f}")
-            if recent.get("hs") is not None:
-                stats_lines.append(f"**Хедшоты:** {recent['hs']:.0f}%")
-            if recent.get("avg_kills") is not None:
-                stats_lines.append(f"**Убийств за матч:** {recent['avg_kills']:.1f}")
-
-            stats_lines.append(f"**Серия побед:** {recent.get('streak', 0)} 🔥")
-
             embed.add_field(
-                name=f"📊 Последние {matches} матчей",
-                value="\n".join(stats_lines),
-                inline=False,
+                name="Win Rate:",
+                value=f"{recent.get('win_rate', 0):.0f}% ({wins}W / {losses}L)",
+                inline=True,
             )
-            embed.set_footer(text="Статистика по последним матчам FACEIT")
+            if recent.get("kd") is not None:
+                embed.add_field(name="Средний K/D:", value=f"{recent['kd']:.2f}", inline=True)
+            if recent.get("hs") is not None:
+                embed.add_field(name="Хедшоты:", value=f"{recent['hs']:.0f}%", inline=True)
+            if recent.get("avg_kills") is not None:
+                embed.add_field(name="Убийств за матч:", value=f"{recent['avg_kills']:.1f}", inline=True)
+            embed.add_field(
+                name="Текущая серия побед:",
+                value=str(recent.get("streak", 0)),
+                inline=True,
+            )
         else:
             embed.add_field(
-                name="📊 Последние матчи",
+                name="Последние матчи:",
                 value="Пока нет данных о недавних матчах CS2.",
                 inline=False,
             )
+
+        # FACEIT генерирует OG-картинку профиля по никнейму; thumbnail остаётся запасным вариантом.
+        og_image = f"https://og-images.faceit-cdn.net/v1/players/{quote(nickname, safe='')}/profile"
+        embed.set_image(url=og_image)
+        if not player.get("faceit_url") and player.get("avatar"):
+            embed.set_thumbnail(url=player["avatar"])
+
+        if matches:
+            embed.set_footer(text=f"Показатели за последние {matches} матчей FACEIT")
 
         await interaction.followup.send(
             embed=embed,
