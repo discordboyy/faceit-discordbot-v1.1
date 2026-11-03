@@ -154,14 +154,18 @@ async def stats_cmd(interaction: discord.Interaction, member: discord.Member | N
     no_ping = discord.AllowedMentions.none()
 
     if target.bot:
-        await interaction.response.send_message("У ботов нет статистики FACEIT.", ephemeral=True)
+        await interaction.response.send_message(
+            "У ботов нет статистики FACEIT.",
+            ephemeral=True,
+        )
         return
 
     user = db.get_user(target.id)
     if not user:
         if own:
             await interaction.response.send_message(
-                "Аккаунт не привязан. Сначала используй `/link`.", ephemeral=True
+                "Аккаунт не привязан. Сначала используй `/link`.",
+                ephemeral=True,
             )
         else:
             await interaction.response.send_message(
@@ -171,17 +175,119 @@ async def stats_cmd(interaction: discord.Interaction, member: discord.Member | N
             )
         return
 
-    # свою статистику показываем только тебе, чужую — в канале
+    # Своя статистика — приватно; статистика другого участника — в канале.
     await interaction.response.defer(thinking=True, ephemeral=own)
     label = None if own else target.display_name
+
     try:
-        text = await asyncio.to_thread(
-            faceit.text_by_steam, user["steam_id64"], user["steam_name"] or "", label
+        player = await asyncio.to_thread(
+            faceit.player_by_steam,
+            user["steam_id64"],
         )
+
+        if player is None:
+            await interaction.followup.send(
+                f"Для Steam-аккаунта **{user.get('steam_name') or 'пользователя'}** "
+                "не найден профиль FACEIT с игрой CS2.",
+                allowed_mentions=no_ping,
+            )
+            return
+
+        cs2 = player.get("games", {}).get("cs2")
+        if not cs2:
+            await interaction.followup.send(
+                f"У игрока **{player.get('nickname', '—')}** "
+                "нет статистики по CS2 на FACEIT.",
+                allowed_mentions=no_ping,
+            )
+            return
+
+        try:
+            recent = await asyncio.to_thread(
+                faceit.recent_stats,
+                player["player_id"],
+            )
+        except Exception:
+            log.warning("Не удалось получить недавнюю статистику FACEIT", exc_info=True)
+            recent = {"matches": 0}
+
+        nickname = player.get("nickname", "—")
+        profile_url = player.get("faceit_url", "").replace("{lang}", "en")
+        matches = recent.get("matches", 0)
+
+        embed = discord.Embed(
+            title=f"🎮 {nickname} · FACEIT CS2",
+            description=f"Статистика игрока **{label or nickname}**",
+            url=profile_url or None,
+            color=discord.Color.orange(),
+        )
+
+        avatar = player.get("avatar")
+        if avatar:
+            embed.set_thumbnail(url=avatar)
+
+        embed.add_field(
+            name="🏅 Уровень",
+            value=f"**{cs2.get('skill_level', '—')}**",
+            inline=True,
+        )
+        embed.add_field(
+            name="🔥 ELO",
+            value=f"**{cs2.get('faceit_elo', '—')}**",
+            inline=True,
+        )
+        embed.add_field(
+            name="🌍 Регион",
+            value=cs2.get("region", "—"),
+            inline=True,
+        )
+        embed.add_field(
+            name="🏳️ Страна",
+            value=str(player.get("country", "—")).upper(),
+            inline=True,
+        )
+
+        if matches:
+            wins = recent.get("wins", 0)
+            losses = matches - wins
+            stats_lines = [
+                f"**Win Rate:** {recent.get('win_rate', 0):.0f}%",
+                f"**Победы / поражения:** {wins}W / {losses}L",
+            ]
+
+            if recent.get("kd") is not None:
+                stats_lines.append(f"**K/D:** {recent['kd']:.2f}")
+            if recent.get("hs") is not None:
+                stats_lines.append(f"**Хедшоты:** {recent['hs']:.0f}%")
+            if recent.get("avg_kills") is not None:
+                stats_lines.append(f"**Убийств за матч:** {recent['avg_kills']:.1f}")
+
+            stats_lines.append(f"**Серия побед:** {recent.get('streak', 0)} 🔥")
+
+            embed.add_field(
+                name=f"📊 Последние {matches} матчей",
+                value="\n".join(stats_lines),
+                inline=False,
+            )
+            embed.set_footer(text="Статистика по последним матчам FACEIT")
+        else:
+            embed.add_field(
+                name="📊 Последние матчи",
+                value="Пока нет данных о недавних матчах CS2.",
+                inline=False,
+            )
+
+        await interaction.followup.send(
+            embed=embed,
+            allowed_mentions=no_ping,
+        )
+
     except Exception:
         log.exception("Ошибка /stats")
-        text = "Не удалось получить статистику FACEIT, попробуй позже."
-    await interaction.followup.send(text, allowed_mentions=no_ping)
+        await interaction.followup.send(
+            "Не удалось получить статистику FACEIT, попробуй позже.",
+            allowed_mentions=no_ping,
+        )
 
 
 # --- Лидерборд -------------------------------------------------------------
