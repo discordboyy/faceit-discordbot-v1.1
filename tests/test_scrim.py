@@ -57,20 +57,27 @@ class TeamBalanceTests(unittest.TestCase):
         self.assertEqual(item["teams"], [[], []])
         self.assertIn("Готовы к игре", scrim._embed(item).description)
 
-    def test_visible_buttons_by_state(self):
+    def test_public_buttons_only_for_participants(self):
         base = {"id": "x", "mode": "level", "teams": [[], []]}
         few = dict(base, status="open", players=self.players[:3])
-        self.assertEqual(scrim._visible_buttons(few), {"join", "leave", "kick", "cancel"})
-        empty = dict(base, status="open", players=[])
-        self.assertEqual(scrim._visible_buttons(empty), {"join", "leave", "cancel"})
+        self.assertEqual(scrim._public_buttons(few), {"join", "leave", "manage"})
         full = dict(base, status="open", players=list(self.players))
-        self.assertNotIn("join", scrim._visible_buttons(full))
-        self.assertNotIn("leave", scrim._visible_buttons(full))
-        self.assertIn("swap", scrim._visible_buttons(full))
+        self.assertEqual(scrim._public_buttons(full), {"manage"})
         locked = dict(base, status="locked", players=list(self.players))
-        self.assertEqual(scrim._visible_buttons(locked), {"finish", "swap", "kick", "ping", "cancel"})
+        self.assertEqual(scrim._public_buttons(locked), {"manage"})
         for status in ("finished", "cancelled"):
-            self.assertEqual(scrim._visible_buttons(dict(base, status=status, players=[])), set())
+            self.assertEqual(scrim._public_buttons(dict(base, status=status, players=[])), set())
+
+    def test_staff_buttons_by_state(self):
+        base = {"id": "x", "mode": "level", "teams": [[], []]}
+        self.assertEqual(scrim._staff_buttons(dict(base, status="open", players=[])), {"cancel"})
+        self.assertEqual(scrim._staff_buttons(dict(base, status="open", players=self.players[:3])),
+                         {"kick", "cancel"})
+        self.assertEqual(scrim._staff_buttons(dict(base, status="open", players=list(self.players))),
+                         {"lock", "reshuffle", "swap", "kick", "ping", "cancel"})
+        self.assertEqual(scrim._staff_buttons(dict(base, status="locked", players=list(self.players))),
+                         {"finish", "swap", "kick", "ping", "cancel"})
+        self.assertEqual(scrim._staff_buttons(dict(base, status="finished", players=[])), set())
 
     def test_swap_players(self):
         item = {"players": list(self.players), "mode": "level", "status": "locked",
