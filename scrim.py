@@ -120,6 +120,14 @@ def _balanced(players, mode):
     return teams
 
 
+def _auto_teams(item):
+    """Как только набралось 10 игроков — сразу делим на команды; меньше 10 — команд нет."""
+    if len(item["players"]) >= MAX_PLAYERS:
+        item["teams"] = _balanced(item["players"][:MAX_PLAYERS], item["mode"])
+    else:
+        item["teams"] = [[], []]
+
+
 def _stat_text(p, mode):
     """Статистика рядом с ником в зависимости от выбранного метода."""
     def has(key):
@@ -183,6 +191,9 @@ def _embed(item):
         main = players[:MAX_PLAYERS]
         desc.append("\n**Готовы к игре**\n" +
                     "\n".join(_player_line(p, mode_key, n) for n, p in enumerate(main, 1)))
+    if assigned and item["status"] == "open":
+        desc.append("\n*Составы предварительные. Организатор может зафиксировать их через /scrim_lock "
+                    "или перемешать через /scrim_rebalance.*")
     if waiting:
         desc.append("\n**Список ожидания**\n" + "\n".join(_player_line(p, mode_key) for p in waiting))
     if not players:
@@ -272,6 +283,7 @@ class ScrimView(discord.ui.View):
         if any(p["id"] == interaction.user.id for p in item["players"]):
             return
         item["players"].append(profile)
+        _auto_teams(item)
         _save(item)
         await interaction.edit_original_response(embed=_embed(item), view=self)
 
@@ -286,6 +298,7 @@ class ScrimView(discord.ui.View):
         if len(item["players"]) == before:
             await interaction.response.send_message("Тебя нет в списке участников.", ephemeral=True)
             return
+        _auto_teams(item)
         _save(item)
         await interaction.response.edit_message(embed=_embed(item), view=self)
 
