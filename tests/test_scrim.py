@@ -57,6 +57,43 @@ class TeamBalanceTests(unittest.TestCase):
         self.assertEqual(item["teams"], [[], []])
         self.assertIn("Готовы к игре", scrim._embed(item).description)
 
+    def test_visible_buttons_by_state(self):
+        base = {"id": "x", "mode": "level", "teams": [[], []]}
+        few = dict(base, status="open", players=self.players[:3])
+        self.assertEqual(scrim._visible_buttons(few), {"join", "leave", "kick", "cancel"})
+        empty = dict(base, status="open", players=[])
+        self.assertEqual(scrim._visible_buttons(empty), {"join", "leave", "cancel"})
+        full = dict(base, status="open", players=list(self.players))
+        self.assertNotIn("join", scrim._visible_buttons(full))
+        self.assertNotIn("leave", scrim._visible_buttons(full))
+        self.assertIn("swap", scrim._visible_buttons(full))
+        locked = dict(base, status="locked", players=list(self.players))
+        self.assertEqual(scrim._visible_buttons(locked), {"finish", "swap", "kick", "ping", "cancel"})
+        for status in ("finished", "cancelled"):
+            self.assertEqual(scrim._visible_buttons(dict(base, status=status, players=[])), set())
+
+    def test_swap_players(self):
+        item = {"players": list(self.players), "mode": "level", "status": "locked",
+                "teams": [list(self.players[:5]), list(self.players[5:])]}
+        self.assertTrue(scrim._swap_players(item, 1, 6))
+        self.assertEqual({p["id"] for p in item["teams"][0]}, {6, 2, 3, 4, 5})
+        self.assertEqual({p["id"] for p in item["teams"][1]}, {1, 7, 8, 9, 10})
+        self.assertFalse(scrim._swap_players(item, 1, 6))  # 1 уже не в команде A
+
+    def test_remove_player_reopens_scrim(self):
+        item = {"players": list(self.players), "mode": "level", "status": "locked", "teams": [[], []]}
+        scrim._auto_teams(item)
+        self.assertTrue(scrim._remove_player(item, 3))
+        self.assertEqual(item["status"], "open")
+        self.assertEqual(len(item["players"]), 9)
+        self.assertEqual(item["teams"], [[], []])
+        self.assertFalse(scrim._remove_player(item, 3))
+
+    def test_finished_embed_shows_winner(self):
+        item = {"id": "abc", "organizer_id": 1, "status": "finished", "mode": "level", "winner": 1,
+                "players": list(self.players), "teams": scrim._balanced(self.players, "level")}
+        self.assertIn("победила команда B", scrim._embed(item).description)
+
     def test_random_balancing_assigns_all_players(self):
         teams = scrim._balanced(self.players, "random")
         self.assertEqual(sorted(map(len, teams)), [5, 5])
