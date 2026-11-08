@@ -79,55 +79,112 @@ def _insert(item):
         )
 
 
+MODE_LABELS = {
+    "random": "Случайно",
+    "elo": "FACEIT ELO",
+    "level": "Уровень FACEIT",
+    "kd": "K/D",
+}
+
+
 def _rating_value(player, mode):
-    if mode == "elo":
-        return player.get("elo")
-    if mode == "level":
-        return player.get("level")
+    if mode in ("elo", "level", "kd"):
+        return player.get(mode)
     return None
 
 
 def _balanced(players, mode):
+    """Делит игроков на две команды с равным числом людей и близкой суммой рейтинга."""
     pool = list(players)
+    half = (len(pool) + 1) // 2
     if mode == "random":
         random.shuffle(pool)
-    else:
-        # Missing FACEIT data is treated as neutral and remains eligible.
-        pool.sort(key=lambda p: (_rating_value(p, mode) is not None,
-                                 _rating_value(p, mode) or 0), reverse=True)
+        return [pool[:half], pool[half:]]
+
+    # Игрокам без данных ставим средний рейтинг остальных, чтобы они не рушили баланс.
+    known = [v for v in (_rating_value(p, mode) for p in pool) if v is not None]
+    fallback = sum(known) / len(known) if known else 0.0
+
+    def value(p):
+        v = _rating_value(p, mode)
+        return float(v) if v is not None else fallback
+
+    pool.sort(key=value, reverse=True)
     teams = [[], []]
     totals = [0.0, 0.0]
     for player in pool:
-        rating = _rating_value(player, mode)
-        value = float(rating or 0)
-        if totals[0] <= totals[1]:
-            idx = 0
-        else:
-            idx = 1
+        open_teams = [i for i in (0, 1) if len(teams[i]) < half]
+        idx = min(open_teams, key=lambda i: totals[i])
         teams[idx].append(player)
-        totals[idx] += value
-    # Shuffle equal-looking random mode already handled above.
+        totals[idx] += value(player)
     return teams
+
+
+def _stat_text(p, mode):
+    """Статистика рядом с ником в зависимости от выбранного метода."""
+    def has(key):
+        return p.get(key) is not None
+
+    if mode == "level":
+        return f"Lv {int(p['level'])}" if has("level") else "нет данных"
+    if mode == "elo":
+        return f"{int(p['elo'])} ELO" if has("elo") else "нет данных"
+    if mode == "kd":
+        return f"{p['kd']:.2f} K/D" if has("kd") else "нет данных"
+    # random: показываем всё, что известно
+    parts = []
+    if has("level"):
+        parts.append(f"Lv {int(p['level'])}")
+    if has("elo"):
+        parts.append(f"{int(p['elo'])} ELO")
+    if has("kd"):
+        parts.append(f"{p['kd']:.2f} K/D")
+    return " · ".join(parts) or "нет данных"
+
+
+def _player_line(p, mode, number=None):
+    prefix = f"{number}. " if number is not None else ""
+    faceit_nick = f" (`{p['nickname']}`)" if p.get("nickname") else ""
+    return f"{prefix}<@{p['id']}>{faceit_nick} · {_stat_text(p, mode)}"
+
+
+def _team_average(team, mode):
+    values = [_rating_value(p, mode) for p in team]
+    values = [v for v in values if v is not None]
+    if not values:
+        return ""
+    avg = sum(values) / len(values)
+    if mode == "kd":
+        return f" · ср. {avg:.2f} K/D"
+    if mode == "elo":
+        return f" · ср. {avg:.0f} ELO"
+    if mode == "level":
+        return f" · ср. Lv {avg:.1f}"
+    return ""
 
 
 def _embed(item):
     players = item["players"]
+    mode_key = item["mode"]
     teams = item.get("teams") or [[], []]
     assigned = bool(any(teams))
     team_ids = {p["id"] for team in teams for p in team}
     waiting = [p for p in players if p["id"] not in team_ids] if assigned else players[MAX_PLAYERS:]
-    def line(p):
-        rating = f" · {p['elo']} ELO / Lv {p['level']}" if p.get("elo") is not None else ""
-        return f"<@{p['id']}>{rating}"
-    mode = {"random": "Случайно", "elo": "FACEIT ELO", "level": "Уровень FACEIT"}.get(item["mode"], item["mode"])
-    status = {"open": "Регистрация открыта", "locked": "Составы зафиксированы", "cancelled": "Отменено"}.get(item["status"], item["status"])
+    mode = MODE_LABELS.get(mode_key, mode_key)
+    status = {"open": "Регистрация открыта", "locked": "Составы зафиксированы",
+              "cancelled": "Отменено"}.get(item["status"], item["status"])
     desc = [f"**Статус:** {status} · **Метод:** {mode}",
-            f"**Записались:** {len(players)}/10"]
-    if teams and any(teams):
+            f"**Записались:** {min(len(players), MAX_PLAYERS)}/{MAX_PLAYERS}"]
+    if assigned:
         for i, team in enumerate(teams):
-            desc.append(f"\n**Команда {('A','B')[i]}**\n" + ("\n".join(line(p) for p in team) or "—"))
+            body = "\n".join(_player_line(p, mode_key) for p in team) or "—"
+            desc.append(f"\n**Команда {('A', 'B')[i]}**{_team_average(team, mode_key)}\n{body}")
+    elif players:
+        main = players[:MAX_PLAYERS]
+        desc.append("\n**Готовы к игре**\n" +
+                    "\n".join(_player_line(p, mode_key, n) for n, p in enumerate(main, 1)))
     if waiting:
-        desc.append("\n**Список ожидания**\n" + "\n".join(line(p) for p in waiting))
+        desc.append("\n**Список ожидания**\n" + "\n".join(_player_line(p, mode_key) for p in waiting))
     if not players:
         desc.append("\nПока игроков нет. Нажми «Присоединиться», чтобы записаться.")
     embed = discord.Embed(title="Скрим 5v5", description="\n".join(desc), color=discord.Color.orange())
@@ -164,19 +221,26 @@ async def _profile(user_id):
     linked = await asyncio.to_thread(db.get_user, user_id)
     if not linked:
         return None
+    profile = {"id": user_id, "name": linked.get("steam_name") or str(user_id),
+               "nickname": None, "elo": None, "level": None, "kd": None}
     try:
         player = await asyncio.to_thread(faceit.player_by_steam, linked["steam_id64"])
-        cs2 = (player or {}).get("games", {}).get("cs2", {})
-        return {
-            "id": user_id,
-            "name": linked.get("steam_name") or str(user_id),
-            "elo": faceit._num(cs2.get("faceit_elo")) if cs2 else None,
-            "level": faceit._num(cs2.get("skill_level")) if cs2 else None,
-        }
     except Exception:
         log.warning("FACEIT lookup failed for scrim signup user %s", user_id, exc_info=True)
-        return {"id": user_id, "name": linked.get("steam_name") or str(user_id),
-                "elo": None, "level": None}
+        return profile
+    if not player:
+        return profile
+    cs2 = player.get("games", {}).get("cs2", {})
+    profile["nickname"] = player.get("nickname")
+    if cs2:
+        profile["elo"] = faceit._num(cs2.get("faceit_elo"))
+        profile["level"] = faceit._num(cs2.get("skill_level"))
+    try:
+        recent = await asyncio.to_thread(faceit.recent_stats, player["player_id"])
+        profile["kd"] = recent.get("kd")
+    except Exception:
+        log.warning("FACEIT K/D lookup failed for scrim signup user %s", user_id, exc_info=True)
+    return profile
 
 
 class ScrimView(discord.ui.View):
@@ -195,13 +259,21 @@ class ScrimView(discord.ui.View):
         if any(p["id"] == interaction.user.id for p in item["players"]):
             await interaction.response.send_message("Ты уже записан.", ephemeral=True)
             return
+        # Запросы к FACEIT могут занять >3 секунд, поэтому сначала подтверждаем нажатие.
+        await interaction.response.defer()
         profile = await _profile(interaction.user.id)
         if profile is None:
-            await interaction.response.send_message("Сначала привяжи Steam с помощью /link.", ephemeral=True)
+            await interaction.followup.send("Сначала привяжи Steam с помощью /link.", ephemeral=True)
+            return
+        item = _load(self.scrim_id)  # состояние могло измениться за время запроса
+        if not item or item["status"] != "open":
+            await interaction.followup.send("Регистрация закрыта.", ephemeral=True)
+            return
+        if any(p["id"] == interaction.user.id for p in item["players"]):
             return
         item["players"].append(profile)
         _save(item)
-        await interaction.response.edit_message(embed=_embed(item), view=self)
+        await interaction.edit_original_response(embed=_embed(item), view=self)
 
     @discord.ui.button(label="Отменить запись", style=discord.ButtonStyle.secondary)
     async def leave(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -273,6 +345,7 @@ class Scrim(commands.Cog):
         app_commands.Choice(name="Случайно", value="random"),
         app_commands.Choice(name="FACEIT ELO", value="elo"),
         app_commands.Choice(name="Уровень FACEIT", value="level"),
+        app_commands.Choice(name="K/D", value="kd"),
     ])
     async def create(self, interaction: discord.Interaction, balancing: app_commands.Choice[str]):
         init_db()
