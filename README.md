@@ -1,177 +1,234 @@
 # Discord FACEIT бот (CS2)
 
+Discord-бот для сообществ по Counter-Strike 2. Показывает статистику FACEIT, строит лидерборд сервера и проводит скримы 5v5 с автоматическим распределением игроков по командам.
+
+## Возможности
+
+- **Привязка аккаунта** через OAuth2 Discord: бот берёт Steam, подключённый к профилю Discord, и сам находит игрока на FACEIT. Пароли и токены Discord не сохраняются.
+- **Статистика FACEIT:** уровень, ELO, регион, Win Rate, средний K/D, хедшоты, убийства за матч, серия побед и последние матчи.
+- **Лидерборд сервера** по ELO, рядом уровень, K/D и Win Rate.
+- **Скримы 5v5:** запись кнопкой, автоматический баланс команд (по уровню, ELO, K/D или случайно), замена игроков, фиксация составов, результат матча.
+- **Хранение данных:** SQLite, Steam ID и имя шифруются ключом Fernet. Ответы FACEIT кэшируются только в памяти.
+
 ## Команды
-- `/link` — авторизация через Discord, бот берёт подключённый Steam, запоминает его и присылает статистику FACEIT (в ЛС и на странице после авторизации).
-- `/stats [участник]` — своя статистика (видна только тебе) или статистика другого участника сервера (в канале). Если участник не привязал аккаунт, бот напишет, что нужно сделать `/link`.
-- `/leaderboard` — топ участников сервера по ELO FACEIT; рядом уровень, K/D и Win Rate за последние матчи. В топ попадают только привязавшие аккаунт и состоящие на этом сервере.
-- `/faceit <ник>` — статистика по нику FACEIT.
-- `/unlink` — удалить свои данные из базы (и из лидерборда).
-- `/scrim <balancing>` — скрим 5v5 с записью по кнопке. Методы распределения: случайно, FACEIT ELO, уровень FACEIT, **K/D** (за последние `STATS_MATCHES` матчей). В сообщении видно, кто записался (`Записались: 10/10`), у каждого — ник и статистика по выбранному методу (уровень / ELO / K/D); у команд показывается средний рейтинг.
-- `/scrim_rebalance`, `/scrim_lock`, `/scrim_move`, `/scrim_cancel` — управление скримом (организатор или модератор).
 
-Кнопки под сообщением скрима (меняются в зависимости от состояния):
-- пока записано меньше 10: **Присоединиться**, **Отменить запись**; у организатора ещё **Убрать игрока** и **Отменить скрим**;
-- при 10/10 кнопки записи пропадают, команды собираются автоматически; организатору доступны **Зафиксировать составы**, **Перемешать**, **Поменять игрока** (выбор игрока из A и игрока из B + подтверждение), **Убрать игрока**, **Позвать игроков** (пинг всех десяти), **Отменить скрим**;
-- после фиксации составов: **Скрим сыгран** (с выбором победителя), **Поменять игрока**, **Убрать игрока**, **Позвать игроков**, **Отменить скрим**.
-Кнопки организатора работают только у организатора и модераторов (`Manage Server` / `Manage Messages`).
+| Команда | Что делает |
+|---|---|
+| `/link` | Авторизация через Discord, привязка Steam и присылка статистики FACEIT |
+| `/stats [участник]` | Своя статистика (видна только тебе) или статистика другого участника сервера |
+| `/leaderboard` | Топ участников сервера по ELO. В топ попадают только привязавшие аккаунт и состоящие на этом сервере |
+| `/faceit <ник>` | Статистика по нику FACEIT, привязка не нужна |
+| `/unlink` | Удалить свои данные из базы бота и из лидерборда |
+| `/scrim <balancing>` | Создать скрим 5v5 |
+| `/scrim_rebalance <scrim_id>` | Перераспределить команды заново |
+| `/scrim_lock <scrim_id>` | Зафиксировать составы и закрыть запись |
+| `/scrim_move <scrim_id> <участник> <команда>` | Перенести игрока в другую команду |
+| `/scrim_cancel <scrim_id>` | Отменить скрим |
 
-Статистика (K/D, Win Rate, хедшоты, убийства, серия побед) считается за последние `STATS_MATCHES` матчей (по умолчанию 30), а не за всё время. Уровень и ELO — текущие.
+Команды управления скримом доступны организатору и модераторам (право `Manage Server` или `Manage Messages`). ID скрима указан в подвале сообщения. Для `/link`, `/stats` и `/faceit` действует ограничение: не чаще раза в 15 секунд на пользователя.
 
-Команды ограничены: `/stats`, `/faceit`, `/link` — раз в 15 секунд на пользователя, `/leaderboard` — раз в 30 секунд на сервер.
+## Скримы 5v5
 
-## Что хранится (SQLite)
-- `users` — discord_id, steam_id64, steam_name (если задан `DB_ENCRYPTION_KEY`, SteamID и имя шифруются Fernet)
-- `oauth_states` — одноразовые state для ссылок авторизации (живут 10 минут)
-- Статистика FACEIT в базе **не хранится**: ответы API кэшируются только в памяти на `CACHE_TTL` секунд (по умолчанию 300) и пропадают при перезапуске. Таблица `cache` из прежних версий удаляется автоматически при запуске.
-- OAuth-токены Discord не хранятся: токен используется один раз и сразу отзывается
+Сначала участник должен привязать Steam через `/link`. Затем организатор создаёт скрим командой `/scrim` и выбирает способ распределения:
 
-## Защита OAuth
-- state одноразовый и привязан к тому, кто вызвал `/link`.
-- После авторизации бот сверяет id аккаунта Discord (`/users/@me`) с владельцем ссылки. Если ссылку открыл другой человек, привязка не выполняется.
+| Метод | Как делятся команды |
+|---|---|
+| Случайно | Игроки делятся случайно |
+| FACEIT ELO | Суммы ELO в командах максимально близки |
+| Уровень FACEIT | Суммы уровней максимально близки |
+| K/D | Суммы K/D за последние `STATS_MATCHES` матчей максимально близки |
 
-## Discord Developer Portal
-- Bot → Reset Token → `DISCORD_TOKEN`
-- OAuth2 → Client ID / Client Secret → `DISCORD_CLIENT_ID` / `DISCORD_CLIENT_SECRET`
-- OAuth2 → Redirects → `https://faceit.makki-solutions.bid/callback` (должен совпадать с `.env` символ в символ) → Save Changes
-- Приглашение бота (scopes `bot` + `applications.commands`, права Send Messages + Embed Links):
-  `https://discord.com/oauth2/authorize?client_id=<CLIENT_ID>&permissions=18432&integration_type=0&scope=bot+applications.commands`
+В любом методе в каждой команде ровно по 5 игроков. Игроки без данных для выбранного метода получают средний рейтинг остальных.
 
-## FACEIT
-https://developers.faceit.com → App Studio → Create App → Server side API key → `FACEIT_API_KEY`
+### Как выглядит сообщение
 
-## Необязательные переменные
-`STATS_MATCHES` (1–100, по умолчанию 30), `LEADERBOARD_SIZE` (1–25, по умолчанию 10), `CACHE_TTL` (секунды, 300).
-
-## Ключ шифрования базы
 ```
+Скрим 5v5
+Статус: Регистрация открыта · Метод: Уровень FACEIT
+Записались: 7/10
+
+Готовы к игре
+1. @игрок (faceit_nick) · Lv 7
+2. @игрок (faceit_nick) · Lv 5
+...
+```
+
+Рядом с каждым ником показывается статистика по выбранному методу: `Lv 7`, `1800 ELO` или `1.12 K/D`. При методе «Случайно» показываются все три значения.
+
+Как только записалось 10 игроков, бот сам делит их на команды и показывает средний рейтинг каждой:
+
+```
+Команда A · ср. Lv 7.0
+@игрок (faceit_nick) · Lv 10
+...
+
+Команда B · ср. Lv 7.0
+@игрок (faceit_nick) · Lv 9
+...
+```
+
+Если записалось больше 10, остальные попадают в список ожидания.
+
+### Кнопки
+
+**Под сообщением, видят все:**
+
+- **Присоединиться** и **Отменить запись** (пока записано меньше 10). При 10/10 эти кнопки пропадают.
+- **⚙ Управление** открывает личное окно, которое видит только нажавший. У остальных участников оно откажет в доступе.
+
+**В личном окне организатора или модератора** (набор кнопок зависит от состояния скрима):
+
+| Кнопка | Что делает |
+|---|---|
+| Зафиксировать составы | Закрепляет команды, статус меняется на «Составы зафиксированы» |
+| Перемешать | Пересобирает команды (равные по рейтингу игроки меняются местами) |
+| Поменять игрока | Выбираешь игрока из команды A, затем игрока из команды B, подтверждаешь, и они меняются командами |
+| Убрать игрока | Убирает записавшегося (например, не пришёл). Запись снова открывается |
+| Позвать игроков | Одним сообщением упоминает всех десятерых |
+| Скрим сыгран | Спрашивает, кто победил (A, B или без результата) и закрывает скрим |
+| Отменить скрим | Отменяет скрим после подтверждения |
+
+### Жизненный цикл скрима
+
+```
+Регистрация открыта (0–9 игроков)
+   └─ набралось 10 → команды собраны автоматически (предварительно)
+        └─ «Зафиксировать составы» → Составы зафиксированы
+             └─ «Скрим сыгран» → Скрим сыгран (с результатом)
+Отмена на любом этапе → Отменено
+```
+
+## Требования
+
+- Python 3.10 или новее
+- Токен Discord-бота и OAuth2-приложение Discord
+- Ключ FACEIT Data API
+- Публичный HTTPS-адрес для OAuth-колбэка (например, через nginx или Caddy)
+
+## Установка
+
+```bash
+git clone https://github.com/discordboyy/faceit-discordbot-v1.1
+cd faceit-discordbot-v1.1
+python -m venv venv
+source venv/bin/activate          # Windows: venv\Scripts\activate
+pip install -r requirements.txt
+# создай файл .env (пример ниже)
+python main.py
+```
+
+### Настройка Discord
+
+1. Создай приложение на [Discord Developer Portal](https://discord.com/developers/applications).
+2. Во вкладке **Bot** создай бота и скопируй токен (`DISCORD_TOKEN`).
+3. Во вкладке **OAuth2** скопируй Client ID и Client Secret.
+4. В **OAuth2 → Redirects** добавь адрес колбэка, он должен точно совпадать с `DISCORD_REDIRECT_URI` (например, `https://example.com/callback`).
+5. Пригласи бота на сервер со scopes `bot` и `applications.commands` и правами: *View Channels*, *Send Messages*, *Embed Links*, *Read Message History*.
+
+Для OAuth-авторизации бот запрашивает только scopes `identify` и `connections`.
+
+### Ключ FACEIT
+
+Создай ключ (Server-side API key) на [developers.faceit.com](https://developers.faceit.com/) и укажи его в `FACEIT_API_KEY`.
+
+### Файл `.env`
+
+```env
+DISCORD_TOKEN=токен_бота
+DISCORD_CLIENT_ID=id_приложения
+DISCORD_CLIENT_SECRET=секрет_приложения
+DISCORD_REDIRECT_URI=https://example.com/callback
+FACEIT_API_KEY=ключ_faceit
+
+# необязательные
+DB_ENCRYPTION_KEY=
+DB_PATH=bot.db
+WEB_HOST=127.0.0.1
+WEB_PORT=5000
+CACHE_TTL=300
+STATS_MATCHES=30
+LEADERBOARD_SIZE=10
+```
+
+| Переменная | По умолчанию | Описание |
+|---|---|---|
+| `DISCORD_TOKEN` | обязательно | Токен бота |
+| `DISCORD_CLIENT_ID` | обязательно | ID приложения Discord |
+| `DISCORD_CLIENT_SECRET` | обязательно | Секрет приложения Discord |
+| `FACEIT_API_KEY` | обязательно | Ключ FACEIT Data API |
+| `DISCORD_REDIRECT_URI` | `https://faceit.makki-solutions.bid/callback` | Адрес OAuth-колбэка. **Обязательно замени на свой** |
+| `DB_ENCRYPTION_KEY` | пусто | Ключ Fernet для шифрования Steam ID и имени. Без него данные хранятся открыто |
+| `DB_PATH` | `bot.db` | Путь к базе SQLite |
+| `WEB_HOST` / `WEB_PORT` | `127.0.0.1` / `5000` | Адрес и порт встроенного веб-сервера для колбэка |
+| `CACHE_TTL` | `300` | Время жизни кэша FACEIT в секундах (хранится только в памяти) |
+| `STATS_MATCHES` | `30` | Сколько последних матчей учитывать в статистике и K/D (1–100) |
+| `LEADERBOARD_SIZE` | `10` | Сколько игроков показывать в лидерборде (1–25) |
+
+Ключ шифрования генерируется так:
+
+```bash
 python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
-Сохрани ключ в менеджере паролей. Без него зашифрованные записи не расшифровать (пользователям придётся сделать `/link` заново).
 
-## Развёртывание на сервере (Ubuntu + nginx)
+Сохрани ключ: без него зашифрованные данные не прочитать. Если в базе уже есть записи без шифрования, при запуске с ключом они зашифруются.
 
-Схема: код в `/opt/faceit-bot` (только для чтения), база в `/var/lib/faceit-bot`, секреты в зашифрованном виде в `/etc/faceit-bot/env.cred`, сервис работает под отдельным пользователем `faceitbot` с ограничениями systemd.
+### Веб-сервер и прокси
 
-```
-sudo useradd --system --no-create-home --shell /usr/sbin/nologin faceitbot
-sudo git clone https://github.com/discordboyy/faceit-discordbot-v1.1.git /opt/faceit-bot
-cd /opt/faceit-bot
-sudo python3 -m venv venv
-sudo venv/bin/pip install -r requirements.txt
+Бот поднимает Flask-сервер (через waitress) на `WEB_HOST:WEB_PORT` для обработки `/callback`. Он слушает только локальный адрес, поэтому направь на него HTTPS-прокси, например в nginx:
+
+```nginx
+location /callback {
+    proxy_pass http://127.0.0.1:5000;
+}
 ```
 
-Секреты (файл `/tmp/faceit.env` с переменными из `.env.example`, `DB_PATH=/var/lib/faceit-bot/bot.db`) шифруются привязанным к серверу ключом systemd:
-```
-sudo mkdir -p /etc/faceit-bot && sudo chmod 700 /etc/faceit-bot
-sudo systemd-creds encrypt --name=env /tmp/faceit.env /etc/faceit-bot/env.cred
-shred -u /tmp/faceit.env
-```
-Посмотреть/изменить: `sudo systemd-creds decrypt --name=env /etc/faceit-bot/env.cred -` (расшифровать → поправить → зашифровать заново).
+### Запуск как сервис (systemd)
 
-### /etc/systemd/system/faceit-bot.service
-```
+```ini
 [Unit]
-Description=Discord FACEIT bot
+Description=FACEIT Discord bot
 After=network-online.target
-Wants=network-online.target
 
 [Service]
-User=faceitbot
-Group=faceitbot
 WorkingDirectory=/opt/faceit-bot
 ExecStart=/opt/faceit-bot/venv/bin/python main.py
-LoadCredentialEncrypted=env:/etc/faceit-bot/env.cred
-StateDirectory=faceit-bot
-Restart=always
-RestartSec=5
-UMask=0077
-
-NoNewPrivileges=true
-PrivateTmp=true
-PrivateDevices=true
-ProtectSystem=strict
-ProtectHome=true
-ProtectKernelTunables=true
-ProtectKernelModules=true
-ProtectControlGroups=true
-RestrictSUIDSGID=true
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
-LockPersonality=true
-CapabilityBoundingSet=
-MemoryMax=300M
+Restart=on-failure
 
 [Install]
 WantedBy=multi-user.target
 ```
+
+Секреты можно передавать через systemd credentials: если задан `CREDENTIALS_DIRECTORY` и в нём лежит файл `env`, бот читает переменные оттуда вместо `.env`.
+
+После обновления кода перезапусти сервис, например `sudo systemctl restart faceit-bot`. Старые сообщения скримов, созданных до обновления, могут потерять кнопки, поэтому создай новый `/scrim`.
+
+## Приватность
+
+- Бот сохраняет только Discord ID, Steam ID и имя Steam. Токен доступа Discord используется один раз во время авторизации и сразу отзывается, в базе его нет.
+- Steam ID и имя шифруются, если задан `DB_ENCRYPTION_KEY`.
+- Любой участник может удалить свои данные командой `/unlink`.
+- Статистика FACEIT не пишется на диск, только кэшируется в памяти.
+- В записи на скрим сохраняются Discord ID, FACEIT-ник, уровень, ELO и K/D на момент записи. Они остаются в базе после завершения скрима.
+
+## Структура проекта
+
 ```
-sudo systemctl daemon-reload
-sudo systemctl enable --now faceit-bot
-sudo journalctl -u faceit-bot -n 30 --no-pager
-sudo systemd-analyze security faceit-bot
+main.py         бот, команды /link /stats /leaderboard /faceit /unlink, OAuth-колбэк
+scrim.py        скримы 5v5: запись, баланс, кнопки и личное окно организатора
+faceit.py       клиент FACEIT Data API с кэшем в памяти
+db.py           SQLite и шифрование данных
+tests/          тесты
+requirements.txt
 ```
 
-Обновление кода: `sudo git -C /opt/faceit-bot pull && sudo systemctl restart faceit-bot`.
+## Тесты
 
-### nginx (поддомен только под /callback)
+```bash
+python -m unittest discover -s tests
 ```
-server {
-    listen 80;
-    server_name faceit.makki-solutions.bid;
 
-    location = /callback {
-        proxy_pass http://127.0.0.1:5000;
-        proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-    location / { return 404; }
-}
-```
-Сертификат: `sudo certbot --nginx -d faceit.makki-solutions.bid`.
+Тесты покрывают балансировку команд, текст сообщения, видимость кнопок, замену и удаление игроков.
 
-## Сон бота ночью (01:00–05:00 UTC+1 = 00:00–04:00 UTC)
-Два таймера systemd: один останавливает сервис, другой запускает.
-```
-sudo tee /etc/systemd/system/faceit-bot-sleep.service > /dev/null << 'EOT'
-[Unit]
-Description=Stop FACEIT bot for the night
-[Service]
-Type=oneshot
-ExecStart=/bin/systemctl stop faceit-bot.service
-EOT
+## Лицензия
 
-sudo tee /etc/systemd/system/faceit-bot-sleep.timer > /dev/null << 'EOT'
-[Unit]
-Description=Night sleep for FACEIT bot
-[Timer]
-OnCalendar=*-*-* 00:00:00 UTC
-[Install]
-WantedBy=timers.target
-EOT
-
-sudo tee /etc/systemd/system/faceit-bot-wake.service > /dev/null << 'EOT'
-[Unit]
-Description=Start FACEIT bot in the morning
-[Service]
-Type=oneshot
-ExecStart=/bin/systemctl start faceit-bot.service
-EOT
-
-sudo tee /etc/systemd/system/faceit-bot-wake.timer > /dev/null << 'EOT'
-[Unit]
-Description=Morning wake for FACEIT bot
-[Timer]
-OnCalendar=*-*-* 04:00:00 UTC
-[Install]
-WantedBy=timers.target
-EOT
-
-sudo systemctl daemon-reload
-sudo systemctl enable --now faceit-bot-sleep.timer faceit-bot-wake.timer
-systemctl list-timers | grep faceit
-```
-Если нужно следовать местному времени Осло (с переходом на летнее), замени `00:00:00 UTC` на `01:00:00 Europe/Oslo` и `04:00:00 UTC` на `05:00:00 Europe/Oslo`.
-
-## Ограничения
-- Connections доступны только через OAuth2 с согласия пользователя.
-- Steam должен быть подключён в Discord и виден (публичный).
-- Premier-рейтинга Valve в открытом API нет — используются данные FACEIT.
+MIT, см. файл `LICENSE`.
