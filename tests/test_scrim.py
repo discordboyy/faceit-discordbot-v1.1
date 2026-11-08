@@ -44,6 +44,19 @@ class TeamBalanceTests(unittest.TestCase):
         self.assertIn("Записались:** 10/10", desc)
         self.assertIn("<@1> · Lv 10", desc)
 
+    def test_teams_appear_automatically_at_ten_players(self):
+        item = {"id": "abc", "organizer_id": 1, "status": "open", "mode": "level",
+                "players": list(self.players), "teams": [[], []]}
+        scrim._auto_teams(item)
+        self.assertEqual([len(t) for t in item["teams"]], [5, 5])
+        desc = scrim._embed(item).description
+        self.assertIn("Команда A", desc)
+        self.assertIn("Команда B", desc)
+        item["players"].pop()
+        scrim._auto_teams(item)
+        self.assertEqual(item["teams"], [[], []])
+        self.assertIn("Готовы к игре", scrim._embed(item).description)
+
     def test_random_balancing_assigns_all_players(self):
         teams = scrim._balanced(self.players, "random")
         self.assertEqual(sorted(map(len, teams)), [5, 5])
