@@ -119,19 +119,19 @@ def _embed(item):
     def line(p):
         rating = f" · {p['elo']} ELO / Lv {p['level']}" if p.get("elo") is not None else ""
         return f"<@{p['id']}>{rating}"
-    mode = {"random": "Tilfeldig", "elo": "FACEIT ELO", "level": "FACEIT level"}.get(item["mode"], item["mode"])
-    status = {"open": "Påmelding åpen", "locked": "Lag låst", "cancelled": "Avlyst"}.get(item["status"], item["status"])
-    desc = [f"**Status:** {status} · **Metode:** {mode}",
-            f"**Påmeldt:** {len(players)}/10"]
+    mode = {"random": "Случайно", "elo": "FACEIT ELO", "level": "Уровень FACEIT"}.get(item["mode"], item["mode"])
+    status = {"open": "Регистрация открыта", "locked": "Составы зафиксированы", "cancelled": "Отменено"}.get(item["status"], item["status"])
+    desc = [f"**Статус:** {status} · **Метод:** {mode}",
+            f"**Записались:** {len(players)}/10"]
     if teams and any(teams):
         for i, team in enumerate(teams):
-            desc.append(f"\n**{('Lag A','Lag B')[i]}**\n" + ("\n".join(line(p) for p in team) or "—"))
+            desc.append(f"\n**Команда {('A','B')[i]}**\n" + ("\n".join(line(p) for p in team) or "—"))
     if waiting:
-        desc.append("\n**Venteliste**\n" + "\n".join(line(p) for p in waiting))
+        desc.append("\n**Список ожидания**\n" + "\n".join(line(p) for p in waiting))
     if not players:
-        desc.append("\nIngen spillere ennå. Trykk Bli med for å melde deg på.")
-    embed = discord.Embed(title="5v5 Scrim", description="\n".join(desc), color=discord.Color.orange())
-    embed.set_footer(text=f"Scrim-ID: {item['id']} · Arrangør: {item['organizer_id']}")
+        desc.append("\nПока игроков нет. Нажми «Присоединиться», чтобы записаться.")
+    embed = discord.Embed(title="Скрим 5v5", description="\n".join(desc), color=discord.Color.orange())
+    embed.set_footer(text=f"ID скрима: {item['id']} · Организатор: {item['organizer_id']}")
     return embed
 
 
@@ -186,33 +186,33 @@ class ScrimView(discord.ui.View):
         self.join.custom_id = f"scrim:{scrim_id}:join"
         self.leave.custom_id = f"scrim:{scrim_id}:leave"
 
-    @discord.ui.button(label="Bli med", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="Присоединиться", style=discord.ButtonStyle.success)
     async def join(self, interaction: discord.Interaction, button: discord.ui.Button):
         item = _load(self.scrim_id)
         if not item or item["status"] != "open":
-            await interaction.response.send_message("Påmeldingen er stengt.", ephemeral=True)
+            await interaction.response.send_message("Регистрация закрыта.", ephemeral=True)
             return
         if any(p["id"] == interaction.user.id for p in item["players"]):
-            await interaction.response.send_message("Du er allerede påmeldt.", ephemeral=True)
+            await interaction.response.send_message("Ты уже записан.", ephemeral=True)
             return
         profile = await _profile(interaction.user.id)
         if profile is None:
-            await interaction.response.send_message("Koble til Steam først med /link.", ephemeral=True)
+            await interaction.response.send_message("Сначала привяжи Steam с помощью /link.", ephemeral=True)
             return
         item["players"].append(profile)
         _save(item)
         await interaction.response.edit_message(embed=_embed(item), view=self)
 
-    @discord.ui.button(label="Meld av", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Отменить запись", style=discord.ButtonStyle.secondary)
     async def leave(self, interaction: discord.Interaction, button: discord.ui.Button):
         item = _load(self.scrim_id)
         if not item or item["status"] != "open":
-            await interaction.response.send_message("Påmeldingen er stengt.", ephemeral=True)
+            await interaction.response.send_message("Регистрация закрыта.", ephemeral=True)
             return
         before = len(item["players"])
         item["players"] = [p for p in item["players"] if p["id"] != interaction.user.id]
         if len(item["players"]) == before:
-            await interaction.response.send_message("Du står ikke på denne listen.", ephemeral=True)
+            await interaction.response.send_message("Тебя нет в списке участников.", ephemeral=True)
             return
         _save(item)
         await interaction.response.edit_message(embed=_embed(item), view=self)
@@ -228,18 +228,18 @@ class ConfirmMoveView(discord.ui.View):
 
     async def _apply(self, interaction):
         if interaction.user.id != self.actor_id:
-            await interaction.response.send_message("Bare den som startet flyttingen kan bekrefte.", ephemeral=True)
+            await interaction.response.send_message("Подтвердить перенос может только тот, кто его начал.", ephemeral=True)
             return
         item = _load(self.scrim_id)
         if not item or item["status"] != "locked":
-            await interaction.response.edit_message(content="Scrimmen er ikke lenger låst/aktiv.", view=None)
+            await interaction.response.edit_message(content="Скрим больше не заблокирован или уже не активен.", view=None)
             return
         if not _is_staff(interaction, item):
-            await interaction.response.send_message("Du har ikke tilgang.", ephemeral=True)
+            await interaction.response.send_message("У тебя нет доступа.", ephemeral=True)
             return
         player = next((p for p in item["players"] if p["id"] == self.player_id), None)
         if not player:
-            await interaction.response.edit_message(content="Spilleren finnes ikke i påmeldingen.", view=None)
+            await interaction.response.edit_message(content="Игрок не найден среди записавшихся.", view=None)
             return
         teams = item.get("teams", [[], []])
         for team in teams:
@@ -247,32 +247,32 @@ class ConfirmMoveView(discord.ui.View):
         teams[self.team_index].append(player)
         item["teams"] = teams
         _save(item)
-        await interaction.response.edit_message(content="Spilleren er flyttet.", view=None)
+        await interaction.response.edit_message(content="Игрок перенесён.", view=None)
         await _refresh(item, interaction)
 
-    @discord.ui.button(label="Bekreft flytting", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="Подтвердить перенос", style=discord.ButtonStyle.danger)
     async def confirm(self, interaction, button):
         await self._apply(interaction)
 
-    @discord.ui.button(label="Avbryt", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Отмена", style=discord.ButtonStyle.secondary)
     async def abort(self, interaction, button):
         if interaction.user.id != self.actor_id:
-            await interaction.response.send_message("Bare den som startet flyttingen kan avbryte.", ephemeral=True)
+            await interaction.response.send_message("Отменить перенос может только тот, кто его начал.", ephemeral=True)
             return
-        await interaction.response.edit_message(content="Flyttingen ble avbrutt.", view=None)
+        await interaction.response.edit_message(content="Перенос отменён.", view=None)
 
 
 class Scrim(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    @app_commands.command(name="scrim", description="Opprett en 5v5 scrim med påmelding")
+    @app_commands.command(name="scrim", description="Создать скрим 5v5 с записью участников")
     @app_commands.guild_only()
-    @app_commands.describe(balancing="Hvordan lagene skal balanseres")
+    @app_commands.describe(balancing="Способ распределения игроков по командам")
     @app_commands.choices(balancing=[
-        app_commands.Choice(name="Tilfeldig", value="random"),
+        app_commands.Choice(name="Случайно", value="random"),
         app_commands.Choice(name="FACEIT ELO", value="elo"),
-        app_commands.Choice(name="FACEIT level", value="level"),
+        app_commands.Choice(name="Уровень FACEIT", value="level"),
     ])
     async def create(self, interaction: discord.Interaction, balancing: app_commands.Choice[str]):
         init_db()
@@ -292,84 +292,84 @@ class Scrim(commands.Cog):
         item["message_id"] = msg.id
         _save(item)
 
-    @app_commands.command(name="scrim_rebalance", description="Fordel påmeldte scrimspillere på nytt")
+    @app_commands.command(name="scrim_rebalance", description="Перераспределить записавшихся игроков по командам")
     @app_commands.guild_only()
     async def rebalance(self, interaction: discord.Interaction, scrim_id: str):
         item = _load(scrim_id)
         if not item or item["guild_id"] != interaction.guild_id:
-            await interaction.response.send_message("Fant ikke scrimmen.", ephemeral=True); return
+            await interaction.response.send_message("Скрим не найден.", ephemeral=True); return
         if not _is_staff(interaction, item):
-            await interaction.response.send_message("Kun arrangør eller moderator kan gjøre dette.", ephemeral=True); return
+            await interaction.response.send_message("Это может сделать только организатор или модератор.", ephemeral=True); return
         if len(item["players"]) < 10:
-            await interaction.response.send_message("Du trenger 10 påmeldte før lagene kan fordeles.", ephemeral=True); return
+            await interaction.response.send_message("Для распределения команд нужно 10 участников.", ephemeral=True); return
         item["teams"] = _balanced(item["players"][:10], item["mode"])
         _save(item)
-        await interaction.response.send_message("Lagene er fordelt på nytt.", ephemeral=True)
+        await interaction.response.send_message("Команды распределены заново.", ephemeral=True)
         await _refresh(item, interaction)
 
-    @app_commands.command(name="scrim_lock", description="Lås scrimlag og steng påmeldingen")
+    @app_commands.command(name="scrim_lock", description="Зафиксировать составы команд и закрыть запись")
     @app_commands.guild_only()
     async def lock(self, interaction: discord.Interaction, scrim_id: str):
         item = _load(scrim_id)
         if not item or item["guild_id"] != interaction.guild_id:
-            await interaction.response.send_message("Fant ikke scrimmen.", ephemeral=True); return
+            await interaction.response.send_message("Скрим не найден.", ephemeral=True); return
         if not _is_staff(interaction, item):
-            await interaction.response.send_message("Kun arrangør eller moderator kan gjøre dette.", ephemeral=True); return
+            await interaction.response.send_message("Это может сделать только организатор или модератор.", ephemeral=True); return
         if len(item["players"]) < 10:
-            await interaction.response.send_message("Det må være 10 påmeldte før scrimmen kan låses.", ephemeral=True); return
+            await interaction.response.send_message("Для блокировки скрима нужно 10 участников.", ephemeral=True); return
         item["teams"] = _balanced(item["players"][:10], item["mode"])
         item["status"] = "locked"
         _save(item)
-        await interaction.response.send_message("Scrimmen er låst.", ephemeral=True)
+        await interaction.response.send_message("Скрим заблокирован.", ephemeral=True)
         await _refresh(item, interaction)
 
-    @app_commands.command(name="scrim_move", description="Flytt en spiller til det andre laget")
+    @app_commands.command(name="scrim_move", description="Перенести игрока в другую команду")
     @app_commands.guild_only()
     @app_commands.choices(team=[
-        app_commands.Choice(name="Lag A", value=0),
-        app_commands.Choice(name="Lag B", value=1),
+        app_commands.Choice(name="Команда A", value=0),
+        app_commands.Choice(name="Команда B", value=1),
     ])
     async def move(self, interaction: discord.Interaction, scrim_id: str,
                    member: discord.Member, team: app_commands.Choice[int]):
         item = _load(scrim_id)
         if not item or item["guild_id"] != interaction.guild_id:
-            await interaction.response.send_message("Fant ikke scrimmen.", ephemeral=True)
+            await interaction.response.send_message("Скрим не найден.", ephemeral=True)
             return
         if not _is_staff(interaction, item):
-            await interaction.response.send_message("Kun arrangør eller moderator kan gjøre dette.", ephemeral=True)
+            await interaction.response.send_message("Это может сделать только организатор или модератор.", ephemeral=True)
             return
         if item["status"] != "locked":
-            await interaction.response.send_message("Lås scrimmen før manuelle lagendringer.", ephemeral=True)
+            await interaction.response.send_message("Сначала зафиксируй составы, чтобы менять команды вручную.", ephemeral=True)
             return
         if not any(p["id"] == member.id for p in item["players"]):
-            await interaction.response.send_message("Spilleren er ikke påmeldt.", ephemeral=True)
+            await interaction.response.send_message("Игрок не записан на скрим.", ephemeral=True)
             return
         current = next((i for i, group in enumerate(item.get("teams", [[], []]))
                         if any(p["id"] == member.id for p in group)), None)
         if current is None:
-            await interaction.response.send_message("Lagene er ikke fordelt ennå.", ephemeral=True)
+            await interaction.response.send_message("Команды ещё не распределены.", ephemeral=True)
             return
         if current == team.value:
-            await interaction.response.send_message("Spilleren er allerede på dette laget.", ephemeral=True)
+            await interaction.response.send_message("Игрок уже в этой команде.", ephemeral=True)
             return
         view = ConfirmMoveView(scrim_id, interaction.user.id, member.id, team.value)
         await interaction.response.send_message(
-            f"Bekreft at {member.mention} flyttes til {'Lag A' if team.value == 0 else 'Lag B'}. "
-            "Dette endrer den manuelle lagfordelingen.",
+            f"Подтверди перенос {member.mention} в {'команду A' if team.value == 0 else 'команду B'}. "
+            "Это изменит состав команд вручную.",
             view=view, ephemeral=True,
         )
 
-    @app_commands.command(name="scrim_cancel", description="Avlys en scrim")
+    @app_commands.command(name="scrim_cancel", description="Отменить скрим")
     @app_commands.guild_only()
     async def cancel(self, interaction: discord.Interaction, scrim_id: str):
         item = _load(scrim_id)
         if not item or item["guild_id"] != interaction.guild_id:
-            await interaction.response.send_message("Fant ikke scrimmen.", ephemeral=True); return
+            await interaction.response.send_message("Скрим не найден.", ephemeral=True); return
         if not _is_staff(interaction, item):
-            await interaction.response.send_message("Kun arrangør eller moderator kan gjøre dette.", ephemeral=True); return
+            await interaction.response.send_message("Это может сделать только организатор или модератор.", ephemeral=True); return
         item["status"] = "cancelled"
         _save(item)
-        await interaction.response.send_message("Scrimmen er avlyst.", ephemeral=True)
+        await interaction.response.send_message("Скрим отменён.", ephemeral=True)
         await _refresh(item, interaction)
 
 
