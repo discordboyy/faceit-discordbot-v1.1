@@ -101,6 +101,45 @@ class TeamBalanceTests(unittest.TestCase):
                 "players": list(self.players), "teams": scrim._balanced(self.players, "level")}
         self.assertIn("победила команда B", scrim._embed(item).description)
 
+    def test_manual_level_is_marked(self):
+        p = {"id": 1, "level": 7.0, "level_manual": True}
+        self.assertEqual(scrim._stat_text(p, "level"), "Lv 7 ✎")
+        item = {"id": "abc", "organizer_id": 1, "status": "open", "mode": "level",
+                "players": [p], "teams": [[], []]}
+        self.assertIn("выставлен администратором", scrim._embed(item).description)
+
+    def test_level_override_is_saved_and_applied_to_active_scrim(self):
+        import os, tempfile
+        import db
+        old_path = db.DB_PATH
+        db.DB_PATH = os.path.join(tempfile.mkdtemp(), "t.db")
+        try:
+            scrim.init_db()
+            self.assertIsNone(scrim._get_override(1, 42))
+            scrim._set_override(1, 42, 6, set_by=1)
+            scrim._set_override(1, 42, 8, set_by=1)  # повторная установка перезаписывает
+            self.assertEqual(scrim._get_override(1, 42), 8)
+            self.assertIsNone(scrim._get_override(2, 42))  # на другом сервере уровня нет
+            self.assertEqual(scrim._list_overrides(1), [(42, 8)])
+
+            players = [dict(p, id=40 + i) for i, p in enumerate(self.players)]
+            item = {"id": "s1", "guild_id": 1, "channel_id": 5, "organizer_id": 1, "status": "open",
+                    "mode": "level", "players": players, "teams": [[], []]}
+            scrim._insert(item)
+            changed = scrim._apply_level(1, 42, 9, True)
+            self.assertEqual(len(changed), 1)
+            saved = scrim._load("s1")
+            self.assertTrue(any(p["id"] == 42 and p["level"] == 9 and p["level_manual"]
+                                for p in saved["players"]))
+            self.assertEqual([len(t) for t in saved["teams"]], [5, 5])
+            self.assertEqual(scrim._apply_level(2, 42, 9, True), [])  # другой сервер не затронут
+
+            self.assertTrue(scrim._delete_override(1, 42))
+            self.assertFalse(scrim._delete_override(1, 42))
+            self.assertIsNone(scrim._get_override(1, 42))
+        finally:
+            db.DB_PATH = old_path
+
     def test_random_balancing_assigns_all_players(self):
         teams = scrim._balanced(self.players, "random")
         self.assertEqual(sorted(map(len, teams)), [5, 5])
