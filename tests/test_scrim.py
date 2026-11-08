@@ -6,10 +6,11 @@ import scrim
 class TeamBalanceTests(unittest.TestCase):
     def setUp(self):
         self.players = [
-            {"id": i, "elo": elo, "level": level}
-            for i, (elo, level) in enumerate(
-                [(2500, 10), (2200, 9), (2000, 8), (1800, 7), (1600, 6),
-                 (1500, 6), (1400, 5), (1300, 4), (1200, 3), (1100, 2)],
+            {"id": i, "elo": elo, "level": level, "kd": kd}
+            for i, (elo, level, kd) in enumerate(
+                [(2500, 10, 1.45), (2200, 9, 1.30), (2000, 8, 1.20), (1800, 7, 1.10),
+                 (1600, 6, 1.05), (1500, 6, 1.00), (1400, 5, 0.95), (1300, 4, 0.90),
+                 (1200, 3, 0.85), (1100, 2, 0.70)],
                 start=1,
             )
         ]
@@ -23,6 +24,25 @@ class TeamBalanceTests(unittest.TestCase):
     def test_level_balancing_assigns_all_players(self):
         teams = scrim._balanced(self.players, "level")
         self.assertEqual(sum(map(len, teams)), 10)
+
+    def test_kd_balancing_is_even_and_close(self):
+        teams = scrim._balanced(self.players, "kd")
+        self.assertEqual([len(team) for team in teams], [5, 5])
+        sums = [sum(p["kd"] for p in team) for team in teams]
+        self.assertLess(abs(sums[0] - sums[1]), 0.2)
+
+    def test_stat_text_matches_mode(self):
+        p = {"id": 1, "elo": 1800.0, "level": 7.0, "kd": 1.1234}
+        self.assertEqual(scrim._stat_text(p, "level"), "Lv 7")
+        self.assertEqual(scrim._stat_text(p, "elo"), "1800 ELO")
+        self.assertEqual(scrim._stat_text(p, "kd"), "1.12 K/D")
+
+    def test_open_scrim_embed_lists_players(self):
+        item = {"id": "abc", "organizer_id": 1, "status": "open", "mode": "level",
+                "players": self.players, "teams": [[], []]}
+        desc = scrim._embed(item).description
+        self.assertIn("Записались:** 10/10", desc)
+        self.assertIn("<@1> · Lv 10", desc)
 
     def test_random_balancing_assigns_all_players(self):
         teams = scrim._balanced(self.players, "random")
