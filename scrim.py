@@ -1,6 +1,7 @@
 """5v5 scrim signup, team balancing and persistent Discord controls."""
 
 import asyncio
+import itertools
 import json
 import logging
 import random
@@ -39,6 +40,16 @@ def init_db():
             conn.execute("ALTER TABLE scrims ADD COLUMN teams_json TEXT NOT NULL DEFAULT '[[],[]]'")
         if "winner" not in columns:
             conn.execute("ALTER TABLE scrims ADD COLUMN winner INTEGER")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS level_overrides (
+                guild_id INTEGER NOT NULL,
+                discord_id INTEGER NOT NULL,
+                level INTEGER NOT NULL,
+                set_by INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+                PRIMARY KEY (guild_id, discord_id)
+            )
+        """)
 
 
 def _load(scrim_id):
@@ -59,6 +70,61 @@ def _save(item):
             (item["status"], json.dumps(item["players"]), json.dumps(item.get("teams", [[], []])),
              item.get("message_id"), item.get("winner"), item["id"]),
         )
+
+
+def _get_override(guild_id, discord_id):
+    with db.get_conn() as conn:
+        row = conn.execute(
+            "SELECT level FROM level_overrides WHERE guild_id = ? AND discord_id = ?",
+            (guild_id, discord_id)).fetchone()
+    return row["level"] if row else None
+
+
+def _set_override(guild_id, discord_id, level, set_by):
+    with db.get_conn() as conn:
+        conn.execute(
+            """INSERT INTO level_overrides (guild_id, discord_id, level, set_by, updated_at)
+               VALUES (?, ?, ?, ?, strftime('%s','now'))
+               ON CONFLICT(guild_id, discord_id) DO UPDATE SET
+                 level = excluded.level, set_by = excluded.set_by, updated_at = excluded.updated_at""",
+            (guild_id, discord_id, level, set_by))
+
+
+def _delete_override(guild_id, discord_id):
+    with db.get_conn() as conn:
+        cur = conn.execute(
+            "DELETE FROM level_overrides WHERE guild_id = ? AND discord_id = ?", (guild_id, discord_id))
+        return cur.rowcount > 0
+
+
+def _list_overrides(guild_id):
+    with db.get_conn() as conn:
+        rows = conn.execute(
+            "SELECT discord_id, level FROM level_overrides WHERE guild_id = ? ORDER BY level DESC, discord_id",
+            (guild_id,)).fetchall()
+    return [(r["discord_id"], r["level"]) for r in rows]
+
+
+def _apply_level(guild_id, discord_id, level, manual):
+    """Обновляет уровень игрока во всех активных скримах сервера. Возвращает изменённые скримы."""
+    changed = []
+    for scrim_id in _active():
+        item = _load(scrim_id)
+        if not item or item["guild_id"] != guild_id:
+            continue
+        touched = False
+        for p in itertools.chain(item["players"], *item.get("teams", [[], []])):
+            if p["id"] == discord_id:
+                p["level"] = level
+                p["level_manual"] = manual
+                touched = True
+        if not touched:
+            continue
+        if item["status"] == "open" and item["mode"] == "level" and len(item["players"]) >= MAX_PLAYERS:
+            _auto_teams(item)  # уровень изменился, предварительные составы пересобираем
+        _save(item)
+        changed.append(item)
+    return changed
 
 
 def _active():
@@ -194,13 +260,17 @@ def _player_label(p, mode):
     return f"{name} · {_stat_text(p, mode)}"[:100]
 
 
+def _lv(p):
+    return f"Lv {int(p['level'])}" + (" ✎" if p.get("level_manual") else "")
+
+
 def _stat_text(p, mode):
     """Статистика рядом с ником в зависимости от выбранного метода."""
     def has(key):
         return p.get(key) is not None
 
     if mode == "level":
-        return f"Lv {int(p['level'])}" if has("level") else "нет данных"
+        return _lv(p) if has("level") else "нет данных"
     if mode == "elo":
         return f"{int(p['elo'])} ELO" if has("elo") else "нет данных"
     if mode == "kd":
@@ -208,7 +278,7 @@ def _stat_text(p, mode):
     # random: показываем всё, что известно
     parts = []
     if has("level"):
-        parts.append(f"Lv {int(p['level'])}")
+        parts.append(_lv(p))
     if has("elo"):
         parts.append(f"{int(p['elo'])} ELO")
     if has("kd"):
@@ -266,6 +336,8 @@ def _embed(item):
                     "команды или нажать «Зафиксировать составы».*")
     if waiting:
         desc.append("\n**Список ожидания**\n" + "\n".join(_player_line(p, mode_key) for p in waiting))
+    if any(p.get("level_manual") for p in players):
+        desc.append("\n✎ — уровень выставлен администратором вручную")
     if not players:
         desc.append("\nПока игроков нет. Нажми «Присоединиться», чтобы записаться.")
     embed = discord.Embed(title="Скрим 5v5", description="\n".join(desc), color=STATUS_COLORS.get(item["status"], discord.Color.orange()))
@@ -298,7 +370,7 @@ def _is_staff(interaction, item):
     return bool(perms and (perms.manage_guild or perms.manage_messages))
 
 
-async def _profile(user_id):
+async def _faceit_profile(user_id):
     linked = await asyncio.to_thread(db.get_user, user_id)
     if not linked:
         return None
@@ -342,6 +414,19 @@ PUBLIC_BUTTONS = ("join", "leave", "manage")
 STAFF_BUTTONS = ("lock", "reshuffle", "finish", "swap", "kick", "ping", "cancel")
 
 
+async def _profile(user_id, guild_id=None):
+    """Профиль игрока для скрима: данные FACEIT + закреплённый администратором уровень (если есть)."""
+    profile = await _faceit_profile(user_id)
+    if profile is None:
+        return None
+    if guild_id is not None:
+        level = _get_override(guild_id, user_id)
+        if level is not None:
+            profile["level"] = level
+            profile["level_manual"] = True
+    return profile
+
+
 class ScrimView(discord.ui.View):
     """Кнопки под сообщением скрима: запись для всех и одна кнопка входа в меню организатора."""
 
@@ -370,7 +455,7 @@ class ScrimView(discord.ui.View):
             return
         # Запросы к FACEIT могут занять >3 секунд, поэтому сначала подтверждаем нажатие.
         await interaction.response.defer()
-        profile = await _profile(interaction.user.id)
+        profile = await _profile(interaction.user.id, interaction.guild_id)
         if profile is None:
             await interaction.followup.send("Сначала привяжи Steam с помощью /link.", ephemeral=True)
             return
@@ -830,6 +915,77 @@ class Scrim(commands.Cog):
         _save(item)
         await interaction.response.send_message("Скрим отменён.", ephemeral=True)
         await _refresh(item, interaction)
+
+    @staticmethod
+    async def _require_admin(interaction):
+        perms = getattr(interaction.user, "guild_permissions", None)
+        if perms and perms.manage_guild:
+            return True
+        await interaction.response.send_message(
+            "Эта команда доступна только администраторам сервера (право Manage Server).", ephemeral=True)
+        return False
+
+    @app_commands.command(name="scrim_setlevel",
+                          description="Закрепить уровень игрока для скримов навсегда (только админ)")
+    @app_commands.guild_only()
+    @app_commands.default_permissions(manage_guild=True)
+    @app_commands.describe(member="Игрок", level="Уровень от 1 до 10")
+    async def setlevel(self, interaction: discord.Interaction, member: discord.Member,
+                       level: app_commands.Range[int, 1, 10]):
+        if not await self._require_admin(interaction):
+            return
+        init_db()
+        _set_override(interaction.guild_id, member.id, level, interaction.user.id)
+        changed = _apply_level(interaction.guild_id, member.id, level, True)
+        note = f"Уровень {member.mention} закреплён: Lv {level}. Он будет использоваться во всех скримах."
+        if changed:
+            note += f" Обновлено активных скримов: {len(changed)}."
+        await interaction.response.send_message(
+            note, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+        for item in changed:
+            await _refresh(item)
+
+    @app_commands.command(name="scrim_resetlevel",
+                          description="Снять закреплённый уровень игрока и вернуть уровень FACEIT (только админ)")
+    @app_commands.guild_only()
+    @app_commands.default_permissions(manage_guild=True)
+    @app_commands.describe(member="Игрок")
+    async def resetlevel(self, interaction: discord.Interaction, member: discord.Member):
+        if not await self._require_admin(interaction):
+            return
+        init_db()
+        if _get_override(interaction.guild_id, member.id) is None:
+            await interaction.response.send_message(
+                "У этого игрока нет закреплённого уровня.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        _delete_override(interaction.guild_id, member.id)
+        profile = await _faceit_profile(member.id)
+        level = profile["level"] if profile else None
+        changed = _apply_level(interaction.guild_id, member.id, level, False)
+        note = f"Закреплённый уровень {member.mention} снят."
+        note += (f" Теперь используется уровень FACEIT: Lv {int(level)}." if level is not None
+                 else " Уровень FACEIT получить не удалось.")
+        await interaction.followup.send(note, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+        for item in changed:
+            await _refresh(item)
+
+    @app_commands.command(name="scrim_levels", description="Список игроков с закреплённым уровнем")
+    @app_commands.guild_only()
+    @app_commands.default_permissions(manage_guild=True)
+    async def levels(self, interaction: discord.Interaction):
+        if not await self._require_admin(interaction):
+            return
+        init_db()
+        rows = _list_overrides(interaction.guild_id)
+        if not rows:
+            await interaction.response.send_message("Закреплённых уровней пока нет.", ephemeral=True)
+            return
+        lines = [f"<@{uid}> — Lv {level}" for uid, level in rows[:50]]
+        extra = f"\n…и ещё {len(rows) - 50}" if len(rows) > 50 else ""
+        await interaction.response.send_message(
+            "**Закреплённые уровни**\n" + "\n".join(lines) + extra,
+            ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 
 
 async def setup(bot):
