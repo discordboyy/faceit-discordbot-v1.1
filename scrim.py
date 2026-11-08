@@ -166,14 +166,23 @@ def _remove_player(item, player_id):
     return True
 
 
-def _visible_buttons(item):
+def _public_buttons(item):
+    """Кнопки в общем сообщении: видят все участники."""
+    if item["status"] == "open":
+        if len(item["players"]) < MAX_PLAYERS:
+            return {"join", "leave", "manage"}
+        return {"manage"}
+    if item["status"] == "locked":
+        return {"manage"}
+    return set()
+
+
+def _staff_buttons(item):
+    """Кнопки личного окна управления: видят только организатор и модераторы."""
     players = len(item["players"])
     if item["status"] == "open":
         if players < MAX_PLAYERS:
-            names = {"join", "leave", "cancel"}
-            if players:
-                names.add("kick")
-            return names
+            return {"kick", "cancel"} if players else {"cancel"}
         return {"lock", "reshuffle", "swap", "kick", "ping", "cancel"}
     if item["status"] == "locked":
         return {"finish", "swap", "kick", "ping", "cancel"}
@@ -315,9 +324,6 @@ async def _profile(user_id):
     return profile
 
 
-BUTTON_NAMES = ("join", "leave", "lock", "reshuffle", "finish", "swap", "kick", "ping", "cancel")
-
-
 async def _deny(interaction, text):
     await interaction.response.send_message(text, ephemeral=True)
 
@@ -332,14 +338,18 @@ async def _staff_gate(interaction, item):
     return True
 
 
+PUBLIC_BUTTONS = ("join", "leave", "manage")
+STAFF_BUTTONS = ("lock", "reshuffle", "finish", "swap", "kick", "ping", "cancel")
+
+
 class ScrimView(discord.ui.View):
-    """Кнопки под сообщением скрима. Набор кнопок зависит от состояния скрима."""
+    """Кнопки под сообщением скрима: запись для всех и одна кнопка входа в меню организатора."""
 
     def __init__(self, item):
         super().__init__(timeout=None)
         self.scrim_id = item["id"]
-        visible = _visible_buttons(item)
-        for name in BUTTON_NAMES:
+        visible = _public_buttons(item)
+        for name in PUBLIC_BUTTONS:
             button = getattr(self, name)
             button.custom_id = f"scrim:{self.scrim_id}:{name}"
             if name not in visible:
@@ -390,95 +400,36 @@ class ScrimView(discord.ui.View):
         _save(item)
         await interaction.response.edit_message(embed=_embed(item), view=_view_for(item))
 
-    # ---------- организатор ----------
-    @discord.ui.button(label="Зафиксировать составы", style=discord.ButtonStyle.primary, row=0)
-    async def lock(self, interaction: discord.Interaction, button: discord.ui.Button):
+    @discord.ui.button(label="⚙ Управление", style=discord.ButtonStyle.secondary, row=0)
+    async def manage(self, interaction: discord.Interaction, button: discord.ui.Button):
         item = _load(self.scrim_id)
-        if not await _staff_gate(interaction, item):
+        if not item or item["status"] not in ACTIVE:
+            await _deny(interaction, "Скрим уже не активен.")
             return
-        if item["status"] != "open" or len(item["players"]) < MAX_PLAYERS:
-            await _deny(interaction, "Для фиксации нужно 10 записавшихся.")
-            return
-        if not any(item.get("teams") or [[], []]):
-            _auto_teams(item)
-        item["status"] = "locked"
-        _save(item)
-        await interaction.response.edit_message(embed=_embed(item), view=_view_for(item))
-
-    @discord.ui.button(label="Перемешать", style=discord.ButtonStyle.secondary, row=0)
-    async def reshuffle(self, interaction: discord.Interaction, button: discord.ui.Button):
-        item = _load(self.scrim_id)
-        if not await _staff_gate(interaction, item):
-            return
-        if item["status"] != "open" or len(item["players"]) < MAX_PLAYERS:
-            await _deny(interaction, "Перемешать можно только до фиксации составов.")
-            return
-        before = _partition(item["teams"])
-        item["teams"] = _balanced(item["players"][:MAX_PLAYERS], item["mode"])
-        _save(item)
-        await interaction.response.edit_message(embed=_embed(item), view=_view_for(item))
-        note = ("Составы пересобраны." if _partition(item["teams"]) != before
-                else "Составы получились такими же: другого равного по рейтингу разбиения нет.")
-        await interaction.followup.send(note, ephemeral=True)
-
-    @discord.ui.button(label="Скрим сыгран", style=discord.ButtonStyle.success, row=0)
-    async def finish(self, interaction: discord.Interaction, button: discord.ui.Button):
-        item = _load(self.scrim_id)
-        if not await _staff_gate(interaction, item):
-            return
-        if item["status"] != "locked":
-            await _deny(interaction, "Сначала зафиксируй составы.")
+        if not _is_staff(interaction, item):
+            await _deny(interaction, "Меню управления доступно только организатору и модераторам.")
             return
         await interaction.response.send_message(
-            "Кто победил?", view=FinishView(self.scrim_id, interaction.user.id), ephemeral=True)
-
-    @discord.ui.button(label="Поменять игрока", style=discord.ButtonStyle.primary, row=1)
-    async def swap(self, interaction: discord.Interaction, button: discord.ui.Button):
-        item = _load(self.scrim_id)
-        if not await _staff_gate(interaction, item):
-            return
-        teams = item.get("teams") or [[], []]
-        if not (teams[0] and teams[1]):
-            await _deny(interaction, "Команды ещё не распределены.")
-            return
-        await interaction.response.send_message(
-            "Выбери игрока из команды A, затем игрока из команды B и нажми «Подтвердить выбор».",
-            view=SwapView(item, interaction.user.id), ephemeral=True)
-
-    @discord.ui.button(label="Убрать игрока", style=discord.ButtonStyle.secondary, row=1)
-    async def kick(self, interaction: discord.Interaction, button: discord.ui.Button):
-        item = _load(self.scrim_id)
-        if not await _staff_gate(interaction, item):
-            return
-        if not item["players"]:
-            await _deny(interaction, "Записавшихся нет.")
-            return
-        await interaction.response.send_message(
-            "Выбери игрока, которого нужно убрать из скрима. Запись снова откроется.",
-            view=KickView(item, interaction.user.id), ephemeral=True)
-
-    @discord.ui.button(label="Позвать игроков", style=discord.ButtonStyle.secondary, row=1)
-    async def ping(self, interaction: discord.Interaction, button: discord.ui.Button):
-        item = _load(self.scrim_id)
-        if not await _staff_gate(interaction, item):
-            return
-        mentions = " ".join(f"<@{p['id']}>" for p in item["players"][:MAX_PLAYERS])
-        await interaction.response.send_message(
-            f"{mentions}\nСкрим 5v5 собран, заходите в игру!",
-            allowed_mentions=discord.AllowedMentions(users=True))
-
-    @discord.ui.button(label="Отменить скрим", style=discord.ButtonStyle.danger, row=1)
-    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        item = _load(self.scrim_id)
-        if not await _staff_gate(interaction, item):
-            return
-        await interaction.response.send_message(
-            "Точно отменить скрим? Кнопки исчезнут, записаться будет нельзя.",
-            view=ConfirmCancelView(self.scrim_id, interaction.user.id), ephemeral=True)
+            _panel_text(item), view=_manage_view(item, interaction.user.id), ephemeral=True)
 
 
 def _view_for(item):
     view = ScrimView(item)
+    return view if view.children else None
+
+
+def _panel_text(item, note=None):
+    teams = item.get("teams") or [[], []]
+    lines = [f"**Управление скримом** `{item['id']}`",
+             f"Записались: {min(len(item['players']), MAX_PLAYERS)}/{MAX_PLAYERS}"
+             + (" · составы собраны" if any(teams) else "")]
+    if note:
+        lines.append(note)
+    return "\n".join(lines)
+
+
+def _manage_view(item, actor_id):
+    view = ManageView(item, actor_id)
     return view if view.children else None
 
 
@@ -501,6 +452,111 @@ class _OwnedView(discord.ui.View):
         if not await _staff_gate(interaction, item):
             return None
         return item
+
+
+class ManageView(_OwnedView):
+    """Личное (ephemeral) окно организатора: кнопки управления видны только ему."""
+
+    def __init__(self, item, actor_id):
+        super().__init__(item["id"], actor_id, timeout=600)
+        visible = _staff_buttons(item)
+        for name in STAFF_BUTTONS:
+            button = getattr(self, name)
+            if name not in visible:
+                self.remove_item(button)
+
+    async def _done(self, interaction, item, note):
+        """Обновляет и это окно, и общее сообщение скрима."""
+        view = _manage_view(item, self.actor_id)
+        text = _panel_text(item, note) if view else (note or "Готово.")
+        await interaction.response.edit_message(content=text, view=view)
+        await _refresh(item, interaction)
+
+    @discord.ui.button(label="Зафиксировать составы", style=discord.ButtonStyle.primary, row=0)
+    async def lock(self, interaction: discord.Interaction, button: discord.ui.Button):
+        item = await self._load_active(interaction)
+        if not item:
+            return
+        if item["status"] != "open" or len(item["players"]) < MAX_PLAYERS:
+            await _deny(interaction, "Для фиксации нужно 10 записавшихся.")
+            return
+        if not any(item.get("teams") or [[], []]):
+            _auto_teams(item)
+        item["status"] = "locked"
+        _save(item)
+        await self._done(interaction, item, "Составы зафиксированы.")
+
+    @discord.ui.button(label="Перемешать", style=discord.ButtonStyle.secondary, row=0)
+    async def reshuffle(self, interaction: discord.Interaction, button: discord.ui.Button):
+        item = await self._load_active(interaction)
+        if not item:
+            return
+        if item["status"] != "open" or len(item["players"]) < MAX_PLAYERS:
+            await _deny(interaction, "Перемешать можно только до фиксации составов.")
+            return
+        before = _partition(item["teams"])
+        item["teams"] = _balanced(item["players"][:MAX_PLAYERS], item["mode"])
+        _save(item)
+        note = ("Составы пересобраны." if _partition(item["teams"]) != before
+                else "Составы получились такими же: другого равного по рейтингу разбиения нет.")
+        await self._done(interaction, item, note)
+
+    @discord.ui.button(label="Скрим сыгран", style=discord.ButtonStyle.success, row=0)
+    async def finish(self, interaction: discord.Interaction, button: discord.ui.Button):
+        item = await self._load_active(interaction)
+        if not item:
+            return
+        if item["status"] != "locked":
+            await _deny(interaction, "Сначала зафиксируй составы.")
+            return
+        await interaction.response.send_message(
+            "Кто победил?", view=FinishView(self.scrim_id, interaction.user.id), ephemeral=True)
+
+    @discord.ui.button(label="Поменять игрока", style=discord.ButtonStyle.primary, row=1)
+    async def swap(self, interaction: discord.Interaction, button: discord.ui.Button):
+        item = await self._load_active(interaction)
+        if not item:
+            return
+        teams = item.get("teams") or [[], []]
+        if not (teams[0] and teams[1]):
+            await _deny(interaction, "Команды ещё не распределены.")
+            return
+        await interaction.response.send_message(
+            "Выбери игрока из команды A, затем игрока из команды B и нажми «Подтвердить выбор».",
+            view=SwapView(item, interaction.user.id), ephemeral=True)
+
+    @discord.ui.button(label="Убрать игрока", style=discord.ButtonStyle.secondary, row=1)
+    async def kick(self, interaction: discord.Interaction, button: discord.ui.Button):
+        item = await self._load_active(interaction)
+        if not item:
+            return
+        if not item["players"]:
+            await _deny(interaction, "Записавшихся нет.")
+            return
+        await interaction.response.send_message(
+            "Выбери игрока, которого нужно убрать из скрима. Запись снова откроется.",
+            view=KickView(item, interaction.user.id), ephemeral=True)
+
+    @discord.ui.button(label="Позвать игроков", style=discord.ButtonStyle.secondary, row=1)
+    async def ping(self, interaction: discord.Interaction, button: discord.ui.Button):
+        item = await self._load_active(interaction)
+        if not item:
+            return
+        mentions = " ".join(f"<@{p['id']}>" for p in item["players"][:MAX_PLAYERS])
+        await interaction.response.send_message(
+            f"{mentions}\nСкрим 5v5 собран, заходите в игру!",
+            allowed_mentions=discord.AllowedMentions(users=True))
+
+    @discord.ui.button(label="Отменить скрим", style=discord.ButtonStyle.danger, row=1)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        item = await self._load_active(interaction)
+        if not item:
+            return
+        await interaction.response.send_message(
+            "Точно отменить скрим? Кнопки исчезнут, записаться будет нельзя.",
+            view=ConfirmCancelView(self.scrim_id, interaction.user.id), ephemeral=True)
+
+
 
 
 class ConfirmCancelView(_OwnedView):
