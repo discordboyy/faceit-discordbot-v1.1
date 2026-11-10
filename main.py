@@ -16,6 +16,7 @@ import asyncio
 import threading
 import logging
 import html
+import math
 import time
 from urllib.parse import quote
 
@@ -53,7 +54,7 @@ WEB_PORT = int(os.getenv("WEB_PORT", "5000"))
 CACHE_TTL = int(os.getenv("CACHE_TTL", "300"))  # секунд, кэш только в памяти
 STATS_MATCHES = int(os.getenv("STATS_MATCHES", "30"))  # статистика за последние N матчей
 LEADERBOARD_SIZE = max(1, min(25, int(os.getenv("LEADERBOARD_SIZE", "10"))))
-LEADERBOARD_MAX_USERS = 50  # сколько привязанных пользователей проверять за один вызов
+LEADERBOARD_MAX_USERS = 100  # сколько привязанных пользователей проверять за один вызов
 DB_PATH = os.getenv("DB_PATH", "bot.db")
 DB_ENCRYPTION_KEY = os.getenv("DB_ENCRYPTION_KEY")
 
@@ -303,7 +304,7 @@ async def is_member(guild: discord.Guild, user_id: int) -> bool:
 
 
 async def collect_leaderboard(guild: discord.Guild) -> tuple[list[dict], int]:
-    """Возвращает (топ по ELO со статистикой, сколько привязавших не имеют CS2 на FACEIT)."""
+    """Возвращает (все игроки по убыванию ELO, сколько привязавших не имеют CS2 на FACEIT)."""
     users = await asyncio.to_thread(db.list_users, LEADERBOARD_MAX_USERS)
     sem = asyncio.Semaphore(4)  # не заваливаем FACEIT API параллельными запросами
 
@@ -335,26 +336,37 @@ async def collect_leaderboard(guild: discord.Guild) -> tuple[list[dict], int]:
             "level": cs2.get("skill_level", "—"),
             "player_id": player["player_id"],
             "recent": {"matches": 0},
+            "recent_loaded": False,
         })
 
     ranked.sort(key=lambda row: row["elo"], reverse=True)
-    top = ranked[:LEADERBOARD_SIZE]
+    return ranked, without_cs2
+
+
+async def load_recent_for(rows: list[dict]) -> None:
+    """Подгружает K/D и WR только для переданных строк (одной страницы)."""
+    sem = asyncio.Semaphore(4)
 
     async def load_recent(row: dict):
+        if row["recent_loaded"]:
+            return
         async with sem:
             try:
                 row["recent"] = await asyncio.to_thread(faceit.recent_stats, row["player_id"])
+                row["recent_loaded"] = True
             except Exception:
                 log.warning("Ошибка загрузки последних матчей", exc_info=True)
 
-    await asyncio.gather(*(load_recent(row) for row in top))
-    return top, without_cs2
+    await asyncio.gather(*(load_recent(row) for row in rows))
 
 
-def build_leaderboard_embed(guild: discord.Guild, top: list[dict], without_cs2: int) -> discord.Embed:
+def build_leaderboard_embed(
+    guild: discord.Guild, ranked: list[dict], without_cs2: int, page: int, pages: int
+) -> discord.Embed:
     medals = {1: "🥇", 2: "🥈", 3: "🥉"}
+    start = page * LEADERBOARD_SIZE
     lines = []
-    for i, row in enumerate(top, 1):
+    for i, row in enumerate(ranked[start:start + LEADERBOARD_SIZE], start + 1):
         parts = [f"Lv **{row['level']}**", f"**{row['elo']}** ELO"]
         r = row["recent"]
         if r.get("matches"):
@@ -368,11 +380,87 @@ def build_leaderboard_embed(guild: discord.Guild, top: list[dict], without_cs2: 
         description="\n".join(lines),
         color=discord.Color.orange(),
     )
-    footer = f"K/D и WR — за последние {STATS_MATCHES} матчей"
+    footer = f"Страница {page + 1}/{pages} · игроков: {len(ranked)}"
+    footer += f" · K/D и WR — за последние {STATS_MATCHES} матчей"
     if without_cs2:
         footer += f" · без CS2 на FACEIT: {without_cs2}"
     embed.set_footer(text=footer)
     return embed
+
+
+class LeaderboardView(discord.ui.View):
+    def __init__(self, guild: discord.Guild, ranked: list[dict], without_cs2: int, owner_id: int):
+        super().__init__(timeout=180)
+        self.guild = guild
+        self.ranked = ranked
+        self.without_cs2 = without_cs2
+        self.owner_id = owner_id
+        self.page = 0
+        self.pages = max(1, math.ceil(len(ranked) / LEADERBOARD_SIZE))
+        self.message: discord.Message | None = None
+        self._sync_buttons()
+
+    def page_rows(self) -> list[dict]:
+        start = self.page * LEADERBOARD_SIZE
+        return self.ranked[start:start + LEADERBOARD_SIZE]
+
+    def embed(self) -> discord.Embed:
+        return build_leaderboard_embed(self.guild, self.ranked, self.without_cs2, self.page, self.pages)
+
+    def _sync_buttons(self):
+        at_start = self.page == 0
+        at_end = self.page >= self.pages - 1
+        self.first.disabled = self.prev.disabled = at_start
+        self.next.disabled = self.last.disabled = at_end
+        self.indicator.label = f"{self.page + 1}/{self.pages}"
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                "Листать может только тот, кто вызвал команду. Запусти `/leaderboard` сам.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    async def _show(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        await load_recent_for(self.page_rows())
+        self._sync_buttons()
+        await interaction.edit_original_response(embed=self.embed(), view=self)
+
+    @discord.ui.button(emoji="⏮", style=discord.ButtonStyle.secondary)
+    async def first(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page = 0
+        await self._show(interaction)
+
+    @discord.ui.button(emoji="◀", style=discord.ButtonStyle.primary)
+    async def prev(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page = max(0, self.page - 1)
+        await self._show(interaction)
+
+    @discord.ui.button(label="1/1", style=discord.ButtonStyle.secondary, disabled=True)
+    async def indicator(self, interaction: discord.Interaction, button: discord.ui.Button):
+        pass
+
+    @discord.ui.button(emoji="▶", style=discord.ButtonStyle.primary)
+    async def next(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page = min(self.pages - 1, self.page + 1)
+        await self._show(interaction)
+
+    @discord.ui.button(emoji="⏭", style=discord.ButtonStyle.secondary)
+    async def last(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page = self.pages - 1
+        await self._show(interaction)
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
 
 
 @bot.tree.command(name="leaderboard", description="Топ участников сервера по ELO FACEIT")
@@ -380,14 +468,24 @@ def build_leaderboard_embed(guild: discord.Guild, top: list[dict], without_cs2: 
 @app_commands.checks.cooldown(1, 30.0, key=lambda i: i.guild_id)
 async def leaderboard(interaction: discord.Interaction):
     await interaction.response.defer(thinking=True)
-    top, without_cs2 = await collect_leaderboard(interaction.guild)
-    if not top:
+    ranked, without_cs2 = await collect_leaderboard(interaction.guild)
+
+    if not ranked:
         await interaction.followup.send(
             "На этом сервере пока никто не привязал аккаунт с CS2 на FACEIT. Используй `/link`."
         )
         return
-    embed = build_leaderboard_embed(interaction.guild, top, without_cs2)
-    await interaction.followup.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+
+    view = LeaderboardView(interaction.guild, ranked, without_cs2, interaction.user.id)
+    await load_recent_for(view.page_rows())  # статистика только для первой страницы
+
+    msg = await interaction.followup.send(
+        embed=view.embed(),
+        view=view if view.pages > 1 else discord.utils.MISSING,
+        allowed_mentions=discord.AllowedMentions.none(),
+        wait=True,
+    )
+    view.message = msg
 
 
 @bot.tree.command(name="faceit", description="Статистика FACEIT по нику")
