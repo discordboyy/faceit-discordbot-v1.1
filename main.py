@@ -57,6 +57,8 @@ LEADERBOARD_SIZE = max(1, min(25, int(os.getenv("LEADERBOARD_SIZE", "10"))))
 LEADERBOARD_MAX_USERS = 100  # сколько привязанных пользователей проверять за один вызов
 DB_PATH = os.getenv("DB_PATH", "bot.db")
 DB_ENCRYPTION_KEY = os.getenv("DB_ENCRYPTION_KEY")
+LEADERBOARD_CACHE_TTL = int(os.getenv("LEADERBOARD_CACHE_TTL", "300"))  # секунд
+LEADERBOARD_SHOW_RECENT = os.getenv("LEADERBOARD_SHOW_RECENT", "1") != "0"  # K/D и WR
 
 if not all([DISCORD_TOKEN, CLIENT_ID, CLIENT_SECRET, FACEIT_API_KEY]):
     raise RuntimeError(
