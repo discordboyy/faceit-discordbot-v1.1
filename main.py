@@ -94,6 +94,8 @@ async def on_ready():
     try:
         if "scrim" not in bot.extensions:
             await bot.load_extension("scrim")
+        if "tournament" not in bot.extensions:
+            await bot.load_extension("tournament")
         synced = await bot.tree.sync()
         log.info(f"Синхронизировано {len(synced)} слэш-команд")
     except Exception as e:
