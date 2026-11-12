@@ -21,7 +21,13 @@ from scrim import (MODE_LABELS, STATUS_COLORS, _deny, _is_staff, _player_line, _
 
 log = logging.getLogger("faceit-bot.tournament")
 
-TEAM_SIZE = 5
+TEAM_SIZE = 5  # формат по умолчанию
+TEAM_FORMATS = {
+    "5v5": 5,
+    "4v4": 4,
+    "3v3": 3,
+    "2v2": 2,
+}
 MIN_TEAMS = 2
 MAX_TEAMS = 8  # 8 × 5 = 40 игроков: больше не влезает в один embed
 ACTIVE = ("open", "locked")
@@ -49,6 +55,15 @@ def init_db():
                 bracket_json TEXT,
                 created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
             )
+            columns = {
+              row["name"]
+              for row in conn.execute("PRAGMA table_info(tournaments)").fetchall()
+          }
+  
+          if "team_size" not in columns:
+              conn.execute(
+                  "ALTER TABLE tournaments ADD COLUMN team_size INTEGER NOT NULL DEFAULT 5"
+              )
         """)
 
 
@@ -58,6 +73,7 @@ def _load(tid):
     if not row:
         return None
     item = dict(row)
+    item["team_size"] = item.get("team_size") or TEAM_SIZE
     item["players"] = json.loads(item.pop("players_json"))
     item["teams"] = json.loads(item.pop("teams_json"))
     raw = item.pop("bracket_json")
@@ -68,22 +84,42 @@ def _load(tid):
 def _save(item):
     with db.get_conn() as conn:
         conn.execute(
-            "UPDATE tournaments SET status=?, players_json=?, teams_json=?, bracket_json=?, "
-            "message_id=? WHERE id=?",
-            (item["status"], json.dumps(item["players"]), json.dumps(item.get("teams", [])),
-             json.dumps(item["bracket"]) if item.get("bracket") else None,
-             item.get("message_id"), item["id"]))
+            "UPDATE tournaments SET status=?, mode=?, team_size=?, players_json=?, "
+            "teams_json=?, bracket_json=?, message_id=? WHERE id=?",
+            (
+                item["status"],
+                item["mode"],
+                item.get("team_size", TEAM_SIZE),
+                json.dumps(item["players"]),
+                json.dumps(item.get("teams", [])),
+                json.dumps(item["bracket"]) if item.get("bracket") else None,
+                item.get("message_id"),
+                item["id"],
+            )
+        )
 
 
 def _insert(item):
     with db.get_conn() as conn:
         conn.execute(
             """INSERT INTO tournaments
-               (id,guild_id,channel_id,organizer_id,status,mode,name,team_count,players_json,teams_json)
-               VALUES (?,?,?,?,?,?,?,?,?,?)""",
-            (item["id"], item["guild_id"], item["channel_id"], item["organizer_id"], item["status"],
-             item["mode"], item.get("name"), item["team_count"], json.dumps(item["players"]),
-             json.dumps(item.get("teams", []))))
+               (id,guild_id,channel_id,organizer_id,status,mode,name,
+                team_count,team_size,players_json,teams_json)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                item["id"],
+                item["guild_id"],
+                item["channel_id"],
+                item["organizer_id"],
+                item["status"],
+                item["mode"],
+                item.get("name"),
+                item["team_count"],
+                item.get("team_size", TEAM_SIZE),
+                json.dumps(item["players"]),
+                json.dumps(item.get("teams", [])),
+            )
+        )
 
 
 def _active():
@@ -93,7 +129,7 @@ def _active():
 
 
 def _needed(item):
-    return item["team_count"] * TEAM_SIZE
+    return item["team_count"] * item.get("team_size", TEAM_SIZE)
 
 
 # ───────────────────────────── баланс команд ─────────────────────────────
@@ -138,34 +174,53 @@ def _local_search(teams, value):
     return totals
 
 
-def _balanced_teams(players, mode, team_count):
-    """Делит игроков на team_count команд по 5 с максимально близкой суммой рейтинга."""
-    pool = list(players)[: team_count * TEAM_SIZE]
-    random.shuffle(pool)  # равные по рейтингу игроки при перемешивании меняются местами
+def _balanced_teams(players, mode, team_count, team_size=TEAM_SIZE):
+    """Делит игроков на команды выбранного размера."""
+
+    pool = list(players)[:team_count * team_size]
+    random.shuffle(pool)
+
     if mode == "random":
-        return [pool[i * TEAM_SIZE:(i + 1) * TEAM_SIZE] for i in range(team_count)]
+        return [
+            pool[i * team_size:(i + 1) * team_size]
+            for i in range(team_count)
+        ]
 
     value = _value_fn(pool, mode)
     ordered = sorted(pool, key=value, reverse=True)
+
     greedy = [[] for _ in range(team_count)]
     totals = [0.0] * team_count
-    for p in ordered:  # жадно: каждого в самую слабую команду, где ещё есть место
-        i = min((i for i in range(team_count) if len(greedy[i]) < TEAM_SIZE), key=lambda i: totals[i])
+
+    for p in ordered:
+        i = min(
+            (i for i in range(team_count) if len(greedy[i]) < team_size),
+            key=lambda i: totals[i]
+        )
         greedy[i].append(p)
         totals[i] += value(p)
 
-    starts = [greedy]  # плюс случайные разбиения: выбираем лучший из локальных минимумов
+    starts = [greedy]
+
     for _ in range(40):
         shuffled = random.sample(pool, len(pool))
-        starts.append([shuffled[i * TEAM_SIZE:(i + 1) * TEAM_SIZE] for i in range(team_count)])
+        starts.append([
+            shuffled[i * team_size:(i + 1) * team_size]
+            for i in range(team_count)
+        ])
+
     best, best_spread = None, None
+
     for teams in starts:
         sums = _local_search(teams, value)
         spread = max(sums) - min(sums)
+
         if best is None or spread < best_spread - 1e-9:
             best, best_spread = teams, spread
+
         if best_spread < 1e-9:
             break
+
     return best
 
 
@@ -198,9 +253,15 @@ def _make_names(teams, mode):
 
 
 def _auto_teams(item):
-    """Как только набрался полный комплект, сразу делим на команды (предварительно)."""
+    """Автоматически собирает команды выбранного размера."""
+
     if len(item["players"]) >= _needed(item):
-        teams = _balanced_teams(item["players"], item["mode"], item["team_count"])
+        teams = _balanced_teams(
+            item["players"],
+            item["mode"],
+            item["team_count"],
+            item.get("team_size", TEAM_SIZE)
+        )
         item["teams"] = _sort_teams(teams, item["mode"])
     else:
         item["teams"] = []
@@ -370,10 +431,6 @@ def _start(item):
 
 # ───────────────────────────── оформление ─────────────────────────────
 
-def _bar(done, total, width=10):
-    filled = round(width * min(done, total) / total) if total else 0
-    return "▰" * filled + "▱" * (width - filled)
-
 
 def _bracket_text(item):
     bracket, names = item["bracket"], item["bracket"]["names"]
@@ -416,12 +473,15 @@ def _embed(item):
     mode_key, players, need = item["mode"], item["players"], _needed(item)
     status = {"open": "Запись открыта", "locked": "Турнир идёт", "finished": "Турнир завершён",
               "cancelled": "Отменён"}.get(item["status"], item["status"])
-    title = "🏆 Турнир 5v5" + (f" · {item['name']}" if item.get("name") else "")
+    title = f"🏆 Турнир {item.get('team_size', TEAM_SIZE)}v{item.get('team_size', TEAM_SIZE)}" + (
+        f" · {item['name']}" if item.get("name") else ""
+    )
     desc = [f"**Статус:** {status} · **Баланс:** {MODE_LABELS.get(mode_key, mode_key)}",
-            f"**Формат:** {item['team_count']} команд × {TEAM_SIZE} = {need} игроков · плей-офф"]
+            f"**Формат:** {item['team_count']} команд × "
+            f"{item.get('team_size', TEAM_SIZE)} = {need} игроков · плей-офф"]
 
     if item["status"] == "open":
-        desc.append(f"**Записались:** {min(len(players), need)}/{need}  {_bar(len(players), need)}")
+        desc.append(f"**Записались:** {min(len(players), need)}/{need}")
 
     if item.get("bracket") and item["status"] == "finished":
         gold, silver, bronze = _podium(item["bracket"])
@@ -619,12 +679,103 @@ class _OwnedView(discord.ui.View):
             return None
         return item
 
+class TournamentSettingsView(_OwnedView):
+
+    def __init__(self, item, actor_id, setting):
+        super().__init__(item["id"], actor_id, timeout=180)
+
+        self.setting = setting
+        self.value = None
+
+        if setting == "mode":
+            options = [
+                discord.SelectOption(
+                    label=label,
+                    value=key,
+                    default=key == item["mode"]
+                )
+                for key, label in MODE_LABELS.items()
+            ]
+            placeholder = "Выбери баланс команд"
+
+        else:
+            options = [
+                discord.SelectOption(
+                    label=format_name,
+                    value=format_name,
+                    default=size == item.get("team_size", TEAM_SIZE)
+                )
+                for format_name, size in TEAM_FORMATS.items()
+            ]
+            placeholder = "Выбери формат турнира"
+
+        self.select = discord.ui.Select(
+            placeholder=placeholder,
+            options=options,
+            row=0
+        )
+        self.select.callback = self.selected
+        self.add_item(self.select)
+
+    async def selected(self, interaction):
+        self.value = self.select.values[0]
+        self.apply.disabled = False
+        await interaction.response.edit_message(view=self)
+
+    @discord.ui.button(
+        label="Применить",
+        style=discord.ButtonStyle.success,
+        disabled=True,
+        row=1
+    )
+    async def apply(self, interaction, button):
+
+        item = await self._item(interaction)
+
+        if not item:
+            return
+
+        if item["status"] != "open":
+            return await _deny(
+                interaction,
+                "Настройки можно менять только до начала турнира."
+            )
+
+        if self.value is None:
+            return
+
+        if self.setting == "mode":
+            item["mode"] = self.value
+
+        else:
+            item["team_size"] = TEAM_FORMATS[self.value]
+
+        _auto_teams(item)
+        _save(item)
+
+        await interaction.response.edit_message(
+            content="Настройки турнира успешно обновлены!",
+            view=None
+        )
+
+        await _refresh(item)
+
+    @discord.ui.button(
+        label="Отмена",
+        style=discord.ButtonStyle.secondary,
+        row=1
+    )
+    async def cancel(self, interaction, button):
+        await interaction.response.edit_message(
+            content="Изменение отменено.",
+            view=None
+        )
 
 class ManageView(_OwnedView):
     def __init__(self, item, actor_id):
         super().__init__(item["id"], actor_id, timeout=600)
         visible = _staff_buttons(item)
-        for name in ("lock", "reshuffle", "result", "undo", "ping", "cancel"):
+        for name in ("lock", "reshuffle", "result", "undo", "ping", "cancel", "balance", "format"):
             if name not in visible:
                 self.remove_item(getattr(self, name))
 
@@ -703,6 +854,58 @@ class ManageView(_OwnedView):
         await interaction.response.send_message(
             "Точно отменить турнир? Сетка и кнопки исчезнут.",
             view=ConfirmCancelView(self.tid, interaction.user.id), ephemeral=True)
+
+        @discord.ui.button(
+        label="Баланс",
+        style=discord.ButtonStyle.primary,
+        row=2
+    )
+    async def balance(self, interaction, button):
+
+        item = await self._item(interaction)
+
+        if not item:
+            return
+
+        if item["status"] != "open":
+            return await _deny(
+                interaction,
+                "Баланс можно менять только до начала турнира."
+            )
+
+        await interaction.response.send_message(
+            "Выбери способ балансировки команд:",
+            view=TournamentSettingsView(
+                item, interaction.user.id, "mode"
+            ),
+            ephemeral=True
+        )
+
+    @discord.ui.button(
+        label="Формат",
+        style=discord.ButtonStyle.primary,
+        row=2
+    )
+    async def format(self, interaction, button):
+
+        item = await self._item(interaction)
+
+        if not item:
+            return
+
+        if item["status"] != "open":
+            return await _deny(
+                interaction,
+                "Формат можно менять только до начала турнира."
+            )
+
+        await interaction.response.send_message(
+            "Выбери формат турнира:",
+            view=TournamentSettingsView(
+                item, interaction.user.id, "format"
+            ),
+            ephemeral=True
+        )
 
 
 class ConfirmCancelView(_OwnedView):
@@ -855,10 +1058,20 @@ class Tournament(commands.Cog):
                      teams: app_commands.Range[int, MIN_TEAMS, MAX_TEAMS],
                      balancing: app_commands.Choice[str], name: str | None = None):
         init_db()
-        item = {"id": uuid.uuid4().hex[:8], "guild_id": interaction.guild_id,
-                "channel_id": interaction.channel_id, "organizer_id": interaction.user.id,
-                "status": "open", "mode": balancing.value, "team_count": teams,
-                "name": name[:40] if name else None, "players": [], "teams": [], "bracket": None}
+        item = {
+            "id": uuid.uuid4().hex[:8],
+            "guild_id": interaction.guild_id,
+            "channel_id": interaction.channel_id,
+            "organizer_id": interaction.user.id,
+            "status": "open",
+            "mode": balancing.value,
+            "team_count": teams,
+            "team_size": TEAM_SIZE,
+            "name": name[:40] if name else None,
+            "players": [],
+            "teams": [],
+            "bracket": None
+        }
         _insert(item)
         await interaction.response.send_message(embed=_embed(item), view=_view_for(item))
         msg = await interaction.original_response()
