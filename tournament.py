@@ -55,16 +55,20 @@ def init_db():
                 bracket_json TEXT,
                 created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
             )
-            columns = {
-              row["name"]
-              for row in conn.execute("PRAGMA table_info(tournaments)").fetchall()
-          }
-  
-          if "team_size" not in columns:
-              conn.execute(
-                  "ALTER TABLE tournaments ADD COLUMN team_size INTEGER NOT NULL DEFAULT 5"
-              )
         """)
+
+        columns = {
+            row["name"]
+            for row in conn.execute(
+                "PRAGMA table_info(tournaments)"
+            ).fetchall()
+        }
+
+        if "team_size" not in columns:
+            conn.execute("""
+                ALTER TABLE tournaments
+                ADD COLUMN team_size INTEGER NOT NULL DEFAULT 5
+            """)
 
 
 def _load(tid):
@@ -775,6 +779,9 @@ class ManageView(_OwnedView):
     def __init__(self, item, actor_id):
         super().__init__(item["id"], actor_id, timeout=600)
         visible = _staff_buttons(item)
+
+        if item["status"] == "open":
+            visible.update({"balance", "format"})
         for name in ("lock", "reshuffle", "result", "undo", "ping", "cancel", "balance", "format"):
             if name not in visible:
                 self.remove_item(getattr(self, name))
