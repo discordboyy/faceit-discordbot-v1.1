@@ -38,7 +38,6 @@ class BalanceTests(unittest.TestCase):
         self.assertLessEqual(max(sums) - min(sums), 90)
 
     def test_missing_data_is_supported(self):
-        item = make_item(4, "elo")
         players = make_players(20, mode_vals=False)
         teams = t._balanced_teams(players, "elo", 4)
         self.assertEqual([len(x) for x in teams], [5] * 4)
@@ -101,6 +100,48 @@ class BracketTests(unittest.TestCase):
         for n in (3, 5, 6, 7):
             b = t._build_bracket(n)
             self.assertTrue(t._ready(b), n)
+
+
+class UndoTests(unittest.TestCase):
+    def semis_done(self):
+        b = t._build_bracket(4)
+        b["names"] = ["A", "B", "C", "D"]
+        for key, _, m in t._ready(b):
+            t._set_winner(b, key, m["a"])
+        return b
+
+    def test_undo_semifinal_removes_winner_and_third_place(self):
+        b = self.semis_done()
+        self.assertIsNotNone(b["third"])
+        self.assertTrue(t._undo(b, "0:0"))
+        self.assertIsNone(b["third"])
+        self.assertIsNone(b["rounds"][1][0]["a"])
+        self.assertEqual([k for k, _, _ in t._ready(b)], ["0:0"])
+        t._set_winner(b, "0:0", b["rounds"][0][0]["b"])  # исправленный результат
+        self.assertEqual(b["rounds"][1][0]["a"], 3)
+        self.assertEqual(b["third"]["a"], 0)
+
+    def test_cannot_undo_after_next_match_played(self):
+        b = self.semis_done()
+        t._set_winner(b, "1:0", b["rounds"][1][0]["a"])
+        self.assertFalse(t._undo(b, "0:0"))
+        self.assertEqual(b["rounds"][0][0]["winner"], 0)
+        self.assertFalse(t._can_undo(b, "0:1"))
+
+    def test_undo_final_after_finish_then_replay(self):
+        b = self.semis_done()
+        t._set_winner(b, "1:0", 0)
+        t._set_winner(b, "third", 3)
+        self.assertTrue(t._finished(b))
+        self.assertTrue(t._undo(b, "1:0"))
+        self.assertFalse(t._finished(b))
+        t._set_winner(b, "1:0", 1)
+        self.assertEqual(t._podium(b)[0], 1)
+
+    def test_bye_matches_are_never_undoable(self):
+        b = t._build_bracket(3)
+        self.assertFalse(t._can_undo(b, "0:0"))
+        self.assertEqual(t._undoable(b), [])
 
 
 class PersistenceTests(unittest.TestCase):
