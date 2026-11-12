@@ -6,7 +6,6 @@
 идут параллельно в разных лобби. Проигравшие полуфиналов играют за 3 место.
 """
 
-import asyncio
 import json
 import logging
 import random
@@ -301,6 +300,42 @@ def _set_winner(bracket, key, team):
         _update_third(bracket)
 
 
+def _can_undo(bracket, key):
+    """Результат можно отменить, только если дальше по сетке с ним ещё не сыграли."""
+    m = _find(bracket, key)
+    if m is None or m["winner"] is None or m.get("bye"):
+        return False
+    if key == "third":
+        return True
+    r, i = map(int, key.split(":"))
+    rounds = bracket["rounds"]
+    if r + 1 < len(rounds) and rounds[r + 1][i // 2]["winner"] is not None:
+        return False
+    if r == len(rounds) - 2 and bracket.get("third") and bracket["third"]["winner"] is not None:
+        return False
+    return True
+
+
+def _undoable(bracket):
+    return [(k, label, m) for k, label, m in _match_list(bracket) if _can_undo(bracket, k)]
+
+
+def _undo(bracket, key):
+    """Снимает результат матча и убирает победителя из следующего матча."""
+    if not _can_undo(bracket, key):
+        return False
+    m = _find(bracket, key)
+    if key != "third":
+        r, i = map(int, key.split(":"))
+        rounds = bracket["rounds"]
+        if r + 1 < len(rounds):
+            rounds[r + 1][i // 2]["a" if i % 2 == 0 else "b"] = None
+        if r == len(rounds) - 2:
+            bracket["third"] = None
+    m["winner"] = None
+    return True
+
+
 def _finished(bracket):
     final = bracket["rounds"][-1][0]
     third = bracket.get("third")
@@ -477,7 +512,10 @@ def _staff_buttons(item):
     if item["status"] == "open":
         return {"lock", "reshuffle", "ping", "cancel"} if full else {"cancel"}
     if item["status"] == "locked":
-        return {"result", "ping", "cancel"}
+        buttons = {"result", "ping", "cancel"}
+        if item.get("bracket") and _undoable(item["bracket"]):
+            buttons.add("undo")
+        return buttons
     return set()
 
 
@@ -586,7 +624,7 @@ class ManageView(_OwnedView):
     def __init__(self, item, actor_id):
         super().__init__(item["id"], actor_id, timeout=600)
         visible = _staff_buttons(item)
-        for name in ("lock", "reshuffle", "result", "ping", "cancel"):
+        for name in ("lock", "reshuffle", "result", "undo", "ping", "cancel"):
             if name not in visible:
                 self.remove_item(getattr(self, name))
 
@@ -632,6 +670,17 @@ class ManageView(_OwnedView):
             return await _deny(interaction, "Сейчас нет матчей, ожидающих результата.")
         await interaction.response.send_message(
             "Выбери матч, затем победителя.", view=ResultView(item, interaction.user.id), ephemeral=True)
+
+    @discord.ui.button(label="Исправить результат", style=discord.ButtonStyle.secondary, row=1)
+    async def undo(self, interaction: discord.Interaction, button: discord.ui.Button):
+        item = await self._item(interaction)
+        if not item:
+            return
+        if not item.get("bracket") or not _undoable(item["bracket"]):
+            return await _deny(interaction, "Нет результатов, которые можно отменить.")
+        await interaction.response.send_message(
+            "Выбери матч, результат которого нужно отменить.",
+            view=UndoView(item, interaction.user.id), ephemeral=True)
 
     @discord.ui.button(label="Позвать игроков", style=discord.ButtonStyle.secondary, row=1)
     async def ping(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -735,6 +784,56 @@ class ResultView(_OwnedView):
         await self._report(interaction, 1)
 
 
+class UndoView(_OwnedView):
+    """Отмена ошибочно внесённого результата. Работает и для завершённого турнира."""
+
+    def __init__(self, item, actor_id):
+        super().__init__(item["id"], actor_id, timeout=180)
+        self.key = None
+        names = item["bracket"]["names"]
+        options = [discord.SelectOption(label=label[:100], value=key,
+                                        description=f"Победила: {names[m['winner']]}"[:100])
+                   for key, label, m in _undoable(item["bracket"])][:25]
+        select = discord.ui.Select(placeholder="Какой результат отменить?", options=options, row=0)
+        select.callback = self._picked
+        self.add_item(select)
+        self.confirm.disabled = True
+
+    async def _item(self, interaction):
+        item = _load(self.tid)
+        if not item or item["status"] not in ("locked", "finished") or not item.get("bracket"):
+            await _deny(interaction, "Турнир не найден или ещё не начался.")
+            return None
+        if not _is_staff(interaction, item):
+            await _deny(interaction, "Это может сделать только организатор или модератор.")
+            return None
+        return item
+
+    async def _picked(self, interaction: discord.Interaction):
+        self.key = interaction.data["values"][0]
+        self.confirm.disabled = False
+        await interaction.response.edit_message(view=self)
+
+    @discord.ui.button(label="Отменить результат", style=discord.ButtonStyle.danger, row=1)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        item = await self._item(interaction)
+        if not item:
+            return
+        if not self.key or not _undo(item["bracket"], self.key):
+            return await interaction.response.edit_message(
+                content="Этот результат уже нельзя отменить: дальше по сетке уже сыграли.", view=None)
+        label = next((l for k, l, _ in _match_list(item["bracket"]) if k == self.key), "Матч")
+        item["status"] = "locked"
+        _save(item)
+        await interaction.response.edit_message(content="Результат отменён, матч снова ждёт игры.", view=None)
+        await _refresh(item, interaction)
+        await _say(item, interaction, f"↩️ Результат матча **{label}** отменён, его нужно сыграть заново.")
+
+    @discord.ui.button(label="Закрыть", style=discord.ButtonStyle.secondary, row=1)
+    async def close(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content="Закрыто.", view=None)
+
+
 # ───────────────────────────── команды ─────────────────────────────
 
 class Tournament(commands.Cog):
@@ -802,6 +901,21 @@ class Tournament(commands.Cog):
             f"{member_a.mention} и {member_b.mention} поменялись командами.", ephemeral=True,
             allowed_mentions=discord.AllowedMentions.none())
         await _refresh(item, interaction)
+
+    @app_commands.command(name="tournament_undo",
+                          description="Исправить ошибочно внесённый результат матча (даже после финала)")
+    @app_commands.guild_only()
+    async def undo(self, interaction: discord.Interaction, tournament_id: str):
+        item = _load(tournament_id)
+        if not item or item["guild_id"] != interaction.guild_id or not item.get("bracket"):
+            return await _deny(interaction, "Турнир не найден или ещё не начался.")
+        if not _is_staff(interaction, item):
+            return await _deny(interaction, "Это может сделать только организатор или модератор.")
+        if item["status"] not in ("locked", "finished") or not _undoable(item["bracket"]):
+            return await _deny(interaction, "Нет результатов, которые можно отменить.")
+        await interaction.response.send_message(
+            "Выбери матч, результат которого нужно отменить.",
+            view=UndoView(item, interaction.user.id), ephemeral=True)
 
     @app_commands.command(name="tournament_kick", description="Убрать игрока из записи (до старта турнира)")
     @app_commands.guild_only()
