@@ -4,6 +4,7 @@ import asyncio
 import itertools
 import json
 import logging
+import os
 import random
 import uuid
 
@@ -363,8 +364,19 @@ async def _refresh(item, interaction=None):
 bot_ref = None
 
 
+def _owner_ids():
+    """ID владельцев бота из переменной окружения BOT_OWNER_IDS (через запятую)."""
+    raw = os.getenv("BOT_OWNER_IDS", "")
+    return {int(x) for x in raw.replace(" ", "").split(",") if x.isdigit()}
+
+
+def _is_owner(interaction):
+    """Владелец бота имеет админские права на любом сервере, где есть бот."""
+    return interaction.user.id in _owner_ids()
+
+
 def _is_staff(interaction, item):
-    if interaction.user.id == item["organizer_id"]:
+    if _is_owner(interaction) or interaction.user.id == item["organizer_id"]:
         return True
     perms = getattr(interaction.user, "guild_permissions", None)
     return bool(perms and (perms.manage_guild or perms.manage_messages))
@@ -919,7 +931,7 @@ class Scrim(commands.Cog):
     @staticmethod
     async def _require_admin(interaction):
         perms = getattr(interaction.user, "guild_permissions", None)
-        if perms and perms.manage_guild:
+        if _is_owner(interaction) or (perms and perms.manage_guild):
             return True
         await interaction.response.send_message(
             "Эта команда доступна только администраторам сервера (право Manage Server).", ephemeral=True)
@@ -928,7 +940,6 @@ class Scrim(commands.Cog):
     @app_commands.command(name="scrim_setlevel",
                           description="Закрепить уровень игрока для скримов навсегда (только админ)")
     @app_commands.guild_only()
-    @app_commands.default_permissions(manage_guild=True)
     @app_commands.describe(member="Игрок", level="Уровень от 1 до 10")
     async def setlevel(self, interaction: discord.Interaction, member: discord.Member,
                        level: app_commands.Range[int, 1, 10]):
@@ -948,7 +959,6 @@ class Scrim(commands.Cog):
     @app_commands.command(name="scrim_resetlevel",
                           description="Снять закреплённый уровень игрока и вернуть уровень FACEIT (только админ)")
     @app_commands.guild_only()
-    @app_commands.default_permissions(manage_guild=True)
     @app_commands.describe(member="Игрок")
     async def resetlevel(self, interaction: discord.Interaction, member: discord.Member):
         if not await self._require_admin(interaction):
@@ -972,7 +982,6 @@ class Scrim(commands.Cog):
 
     @app_commands.command(name="scrim_levels", description="Список игроков с закреплённым уровнем")
     @app_commands.guild_only()
-    @app_commands.default_permissions(manage_guild=True)
     async def levels(self, interaction: discord.Interaction):
         if not await self._require_admin(interaction):
             return
